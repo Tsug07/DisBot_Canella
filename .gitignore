@@ -1,8 +1,23 @@
-# Environment variables
+# Environment variables (raiz - antigos)
 .env
 
-# Google credentials
-*.json
+# Google credentials (raiz - antigos)
+gen-lang-client-*.json
+
+# Arquivos antigos (raiz - serão removidos gradualmente)
+estado_empresas.json
+bot_logs.log
+
+# === Estrutura de cada Bot ===
+# Configurações sensíveis de cada bot
+Bot_*/config/.env
+Bot_*/config/*.json
+!Bot_*/config/.env.example
+
+# Dados e estado de cada bot
+Bot_*/data/
+Bot_*/logs/
+Bot_*/backups/
 
 # Python
 __pycache__/
@@ -30,12 +45,8 @@ wheels/
 .vscode/
 *.code-workspace
 
-# Estado do bot
-estado_empresas.json
-
 # Logs
-bot_logs.log
 *.log
 
-# Backups
+# Backups gerais
 backups/
