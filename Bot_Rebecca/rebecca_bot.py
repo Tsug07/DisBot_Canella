@@ -5,6 +5,7 @@ import email
 from email.header import decode_header
 import re
 import os
+from datetime import datetime
 from dotenv import load_dotenv
 from config import get_logger
 
@@ -30,6 +31,38 @@ def decode(string):
         return text
     except:
         return string
+
+
+# ------------------------------------------
+# FUNÇÃO PARA FORMATAR DATA NO PADRÃO BRASILEIRO
+# ------------------------------------------
+def format_date_br(date_string):
+    """
+    Garante que a data esteja no formato brasileiro DD/MM/YYYY HH:MM:SS
+    Aceita diversos formatos de entrada e converte para o padrão BR
+    """
+    try:
+        # Remove espaços extras
+        date_string = date_string.strip()
+
+        # Tenta detectar e converter diferentes formatos
+        # Formato: YYYY-MM-DD HH:MM:SS ou YYYY/MM/DD HH:MM:SS (padrão americano)
+        for fmt in ['%Y-%m-%d %H:%M:%S', '%Y/%m/%d %H:%M:%S', '%m/%d/%Y %H:%M:%S']:
+            try:
+                dt = datetime.strptime(date_string, fmt)
+                return dt.strftime('%d/%m/%Y %H:%M:%S')
+            except ValueError:
+                continue
+
+        # Se já estiver no formato DD/MM/YYYY HH:MM:SS, retorna como está
+        if re.match(r'\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}', date_string):
+            return date_string
+
+        # Se não conseguiu converter, retorna o original
+        return date_string
+    except Exception as e:
+        logger.warning(f"Erro ao formatar data '{date_string}': {e}")
+        return date_string
 
 
 # ------------------------------------------
@@ -85,13 +118,17 @@ def extract_all_notifications(body):
             assunto_match = re.search(r'<b>Assunto:\s*</b>([^<]+)', table_html)
             
             # Verifica se todos os campos foram encontrados
-            if all([data_hora_match, tipo_receita_match, categoria_match, 
+            if all([data_hora_match, tipo_receita_match, categoria_match,
                     tipo_mensagem_match, assunto_match]):
-                
+
+                # Formata a data para o padrão brasileiro
+                data_hora_original = data_hora_match.group(1).strip()
+                data_hora_formatada = format_date_br(data_hora_original)
+
                 notification = {
                     'cnpj': cnpj,
                     'cliente': cliente,
-                    'data_hora': data_hora_match.group(1).strip(),
+                    'data_hora': data_hora_formatada,
                     'tipo_receita': tipo_receita_match.group(1).strip(),
                     'categoria': categoria_match.group(1).strip(),
                     'tipo_mensagem': tipo_mensagem_match.group(1).strip(),
@@ -144,23 +181,19 @@ def check_emails():
 
                     # Verifica se é um e-mail DEC-SEFAZ
                     if "Aviso de mensagens - Consulta DEC-SEFAZ/RJ" in subject:
-                        # Debug: mostra o corpo do e-mail para ajustar o regex
-                        logger.info("=" * 60)
-                        logger.info("CORPO DO E-MAIL (DEBUG):")
-                        logger.info("=" * 60)
-                        print(body)
-                        logger.info("=" * 60)
+                        logger.info(f">> Email DEC-SEFAZ encontrado! Processando...")
 
                         # Extrai TODAS as notificações do corpo do e-mail
                         notifications = extract_all_notifications(body)
-                        
+
                         if notifications:
-                            logger.info(f"Encontradas {len(notifications)} notificação(ões) no e-mail")
+                            logger.info(f">> Encontradas {len(notifications)} notificacao(es) no e-mail")
                             for notif in notifications:
-                                logger.info(f"  -> Cliente: {notif['cliente']} | CNPJ: {notif['cnpj']} | Categoria: {notif['categoria']}")
+                                logger.info(f"   -> Cliente: {notif['cliente']} | CNPJ: {notif['cnpj']}")
+                                logger.info(f"      Categoria: {notif['categoria']} | Tipo: {notif['tipo_mensagem']}")
                                 all_notifications.append(notif)
                         else:
-                            logger.debug(f"E-mail não contém notificações no padrão esperado")
+                            logger.warning(f">> E-mail DEC-SEFAZ nao contem notificacoes no padrao esperado")
                     else:
                         logger.debug(f"E-mail descartado - assunto não corresponde")
 
@@ -186,11 +219,19 @@ async def email_monitor():
         
         notifications = check_emails()
 
+        logger.info(f">> Total de notificacoes coletadas: {len(notifications)}")
+
+        enviadas = 0
+        ignoradas = 0
+
         for info in notifications:
             # Filtra apenas notificações com Categoria: NOTIFICAÇÃO e Tipo de Mensagem: CADASTRO
             if info['categoria'].upper() != "NOTIFICAÇÃO" or info['tipo_mensagem'].upper() != "CADASTRO":
-                logger.debug(f"Notificação ignorada - Categoria: {info['categoria']} | Tipo: {info['tipo_mensagem']}")
+                logger.info(f">> Notificacao IGNORADA - Categoria: {info['categoria']} | Tipo: {info['tipo_mensagem']}")
+                ignoradas += 1
                 continue
+
+            logger.info(f">> Enviando notificacao para Discord - Cliente: {info['cliente']}")
 
             embed = discord.Embed(
                 title="🚨 Nova Notificação SEFAZ/RJ",
@@ -208,7 +249,11 @@ async def email_monitor():
             embed.add_field(name="📌 Assunto da Notificação", value=info['assunto_notificacao'], inline=False)
 
             await channel.send("@everyone", embed=embed)
-            logger.info(f"Mensagem enviada ao Discord (com @everyone) | Cliente: {info['cliente']}")
+            logger.info(f">> Mensagem enviada com sucesso! | Cliente: {info['cliente']}")
+            enviadas += 1
+
+        if enviadas > 0 or ignoradas > 0:
+            logger.info(f">> Resumo: {enviadas} enviada(s), {ignoradas} ignorada(s)")
     
     except Exception as e:
         logger.error(f"Erro na tarefa de monitoramento: {str(e)}")
