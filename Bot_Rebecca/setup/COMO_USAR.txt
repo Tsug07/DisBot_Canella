@@ -24,6 +24,11 @@
 OPÇÃO 1 - Com Python (mais simples):
    > Duplo clique em: Iniciar_Gerenciador.bat
 
+   ⚠️  O gerenciador inicia MINIMIZADO NA BANDEJA DO SISTEMA
+   → Procure o ícone azul na bandeja (ao lado do relógio)
+   → Clique no ícone para abrir o gerenciador
+   → O bot inicia automaticamente em segundo plano
+
 OPÇÃO 2 - Com Executável (mais profissional):
    > Duplo clique em: RebeccaManager.exe
    (se você compilou usando build_exe.bat)
@@ -56,21 +61,26 @@ Na interface do gerenciador, ative:
 💡 DICAS IMPORTANTES
 ═══════════════════════════════════════════════════════════════
 
+• O gerenciador INICIA NA BANDEJA DO SISTEMA
+  → Procure o ícone azul ao lado do relógio
+  → Clique com botão direito para ver opções
+  → Clique com botão esquerdo para abrir o gerenciador
+
 • O bot roda TOTALMENTE EM SEGUNDO PLANO
   → Não abre nenhuma janela CMD
   → Pode fechar o gerenciador que o bot continua rodando
 
 • Se fechar o gerenciador com bot rodando:
-  → SIM = Mantém bot rodando
-  → NÃO = Para o bot
-  → CANCELAR = Não fecha o gerenciador
+  → Ele minimiza para a bandeja automaticamente
+  → O bot continua funcionando normalmente
 
 • Pode reabrir o gerenciador depois:
   → Ele detecta automaticamente se o bot está rodando
 
 • Autostart do Windows:
-  → Inicia o bot direto (sem abrir gerenciador)
+  → Inicia o bot direto na bandeja (sem abrir janela)
   → Roda em segundo plano silenciosamente
+  → Perfeito para não incomodar outros usuários do PC
 
 
 🔧 SOLUÇÃO DE PROBLEMAS

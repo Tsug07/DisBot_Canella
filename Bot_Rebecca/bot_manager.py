@@ -65,12 +65,33 @@ class BotManager(ctk.CTk):
         self.load_config()
         self.setup_ui()
         self.check_autostart_status()
+
+        # Verifica se já existe um bot rodando ANTES de tentar iniciar
+        bot_already_running = False
+        if os.path.exists(self.pid_file):
+            try:
+                with open(self.pid_file, 'r') as f:
+                    pid = int(f.read().strip())
+                try:
+                    os.kill(pid, 0)
+                    bot_already_running = True
+                except (OSError, PermissionError):
+                    os.remove(self.pid_file)
+            except:
+                pass
+
         self.check_detached_bot()
         self.create_tray_icon()  # Cria ícone na bandeja do sistema
 
-        # Inicia o bot automaticamente se não estiver rodando
-        if not self.is_running:
+        # Inicia minimizado na bandeja
+        self.withdraw()  # Esconde a janela principal
+
+        # Inicia o bot automaticamente apenas se não estava rodando antes
+        if not bot_already_running:
             self.after(1000, self.start_bot)  # Delay de 1 segundo para UI carregar
+
+        # Mostra notificação de inicialização na bandeja
+        self.after(2000, self.show_tray_notification)
 
     def create_tray_icon(self):
         """Cria o ícone na bandeja do sistema"""
@@ -98,6 +119,18 @@ class BotManager(ctk.CTk):
     def show_window(self, icon=None, item=None):
         self.after(0, self.deiconify)
         self.after(0, self.lift)
+
+    def show_tray_notification(self):
+        """Mostra notificação de que o gerenciador está rodando na bandeja"""
+        try:
+            if hasattr(self, 'tray_icon') and self.tray_icon:
+                self.tray_icon.notify(
+                    title="Rebecca Bot - Gerenciador",
+                    message="Gerenciador iniciado na bandeja. Clique no ícone para abrir."
+                )
+        except Exception as e:
+            # Se a notificação falhar, não é crítico
+            pass
 
     def exit_from_tray(self, icon=None, item=None):
         if self.is_running:
