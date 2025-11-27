@@ -164,10 +164,15 @@ class MyBot(discord.Client):
     async def on_ready(self):
         print(f"O Bot {self.user} está online!")
         logger.info(f"O Bot {self.user} está online!")
-        self.gc = gspread.authorize(
-            Credentials.from_service_account_file(PATH_CREDENTIALS, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
-        )
-        self.sheet = self.gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+
+        # Inicializa Google Sheets em thread separada para não bloquear o loop
+        def init_sheets():
+            gc = gspread.authorize(
+                Credentials.from_service_account_file(PATH_CREDENTIALS, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+            )
+            return gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+
+        self.sheet = await asyncio.to_thread(init_sheets)
 
         # Carrega histórico de alterações
         self.historico_alteracoes = self.carregar_historico()
@@ -209,13 +214,13 @@ class MyBot(discord.Client):
                 self.ultima_verificacao = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
                 print(f"\nVerificando planilha... {self.ultima_verificacao}")
                 logger.info(f"Verificando planilha... {self.ultima_verificacao}")
-                data = self.sheet.get_all_records()
-                print(f"Dados obtidos com sucesso! ({len(data)-1} linhas, excluindo cabeçalho)")
-                logger.info(f"Dados obtidos com sucesso! ({len(data)-1} linhas)")
-                novos_dados = {}
 
-                # Buscar dados por posição das colunas em vez de nomes
-                data = self.sheet.get_all_values()  # Pega todos os valores brutos
+                # Executa a chamada síncrona em thread separada para não bloquear o loop
+                data = await asyncio.to_thread(self.sheet.get_all_values)
+
+                print(f"Dados obtidos com sucesso! ({len(data)} linhas)")
+                logger.info(f"Dados obtidos com sucesso! ({len(data)} linhas)")
+                novos_dados = {}
                 if len(data) <= 1:  # Verifica se há dados além do cabeçalho
                     print("Planilha vazia ou contém apenas cabeçalho")
                     logger.warning("Planilha vazia ou contém apenas cabeçalho")
@@ -353,7 +358,7 @@ class MyBot(discord.Client):
 
                 # Atualiza dados salvos
                 self.sheet_data = novos_dados
-                self.salvar_estado(novos_dados)
+                await self.salvar_estado(novos_dados)
                 
                 # Se for a primeira carga, marca como completa APÓS salvar tudo
                 if not self.primeiro_carregamento_completo:
@@ -364,7 +369,7 @@ class MyBot(discord.Client):
                 print(f"Erro ao monitorar planilha: {e}")
                 logger.error(f"Erro ao monitorar planilha: {e}")
 
-            await asyncio.sleep(30)
+            await asyncio.sleep(150)  # 2.5 minutos - equilíbrio entre responsividade e eficiência
 
 
     # === Funções auxiliares ===
@@ -384,9 +389,11 @@ class MyBot(discord.Client):
         print("Nenhum estado salvo encontrado. Criando novo...")
         return {}
 
-    def salvar_estado(self, dados):
+    async def salvar_estado(self, dados):
+        """Salva o estado em arquivo de forma assíncrona."""
         caminho = DATA_DIR / "estado_empresas.json"
-        try:
+
+        def _salvar():
             estado_completo = {
                 "ultima_verificacao": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
                 "registros": dados
@@ -398,7 +405,10 @@ class MyBot(discord.Client):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = BACKUPS_DIR / f"estado_empresas_backup_{timestamp}.json"
             shutil.copy(caminho, backup_path)
+            return estado_completo, backup_path
 
+        try:
+            estado_completo, backup_path = await asyncio.to_thread(_salvar)
             print(f"Estado salvo com sucesso em {estado_completo['ultima_verificacao']}")
             logger.info(f"Estado salvo com sucesso. Backup: {backup_path}")
         except Exception as e:
@@ -420,12 +430,16 @@ class MyBot(discord.Client):
                 logger.error(f"Erro ao carregar histórico: {e}")
         return {}
 
-    def salvar_historico(self):
-        """Salva o histórico de alterações."""
+    async def salvar_historico(self):
+        """Salva o histórico de alterações de forma assíncrona."""
         caminho = DATA_DIR / "historico_alteracoes.json"
-        try:
+
+        def _salvar():
             with open(caminho, "w", encoding="utf-8") as f:
                 json.dump(self.historico_alteracoes, f, indent=4, ensure_ascii=False)
+
+        try:
+            await asyncio.to_thread(_salvar)
             logger.info("Histórico salvo com sucesso.")
         except Exception as e:
             print(f"Erro ao salvar histórico: {e}")
@@ -463,8 +477,8 @@ class MyBot(discord.Client):
         elif tipo == "regime_tributario":
             self.historico_alteracoes[competencia]["estatisticas"]["alteracoes_regime"] += 1
 
-        # Salva o histórico
-        self.salvar_historico()
+        # Agenda o salvamento do histórico (não bloqueia)
+        asyncio.create_task(self.salvar_historico())
 
         logger.info(f"Alteração registrada: {tipo} - {codigo} - {nome} (Competência: {competencia})")
 
