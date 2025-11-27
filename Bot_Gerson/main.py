@@ -46,7 +46,7 @@ GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
 PATH_CREDENTIALS = CONFIG_DIR / os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
 DIA_RELATORIO_MENSAL = int(os.getenv('DIA_RELATORIO_MENSAL', '5'))  # Dia do mês para enviar relatório
 
-STATUS_MONITORADOS = ["INATIVO", "BAIXA", "DEVOLVIDA", "SUSPENSA"]
+STATUS_MONITORADOS = ["INATIVA", "BAIXA", "DEVOLVIDA", "SUSPENSA"]
 
 # Mapeamento de variações de status e regimes para valores normalizados
 MAPEAMENTO_STATUS = {
@@ -54,7 +54,7 @@ MAPEAMENTO_STATUS = {
     "ATIVA": "ATIVA",
     "ATIVO": "ATIVA",
     "INATIVA": "INATIVA",
-    "INATIVO": "INATIVO",
+    "INATIVO": "INATIVA",  # Normaliza INATIVO para INATIVA
     "BAIXA": "BAIXA",
     "BAIXADA": "BAIXA",
     "DEVOLVIDA": "DEVOLVIDA",
@@ -123,26 +123,17 @@ def eh_status_monitorado(status):
     """Verifica se o status é um dos monitorados (considerando variações)."""
     status_normalizado = normalizar_status(status)
 
-    # Status diretamente monitorados
-    if status_normalizado in STATUS_MONITORADOS:
-        return True
-
-    # Variações específicas também são monitoradas
-    status_problematicos = ["INATIVO", "BAIXA", "DEVOLVIDA", "SUSPENSA"]
-    for prob in status_problematicos:
-        if prob in status_normalizado:
-            return True
-
-    return False
+    # Verifica se o status normalizado está na lista de monitorados
+    return status_normalizado in STATUS_MONITORADOS
 
 # === FUNÇÕES DE CONTROLE DE PRIMEIRO CARREGAMENTO ===
 def verificar_primeiro_carregamento():
     """Verifica se é o primeiro carregamento da aplicação."""
     flag_path = DATA_DIR / "primeiro_carregamento.flag"
     if flag_path.exists():
-        logger.info("✅ Primeiro carregamento já foi realizado. Notificações serão enviadas normalmente.")
+        logger.info("Primeiro carregamento já foi realizado. Notificações serão enviadas normalmente.")
         return True
-    logger.info("⚠️ Primeira execução detectada. Será feito um carregamento sem notificações.")
+    logger.info("Primeira execução detectada. Será feito um carregamento sem notificações.")
     return False
 
 def marcar_primeiro_carregamento():
@@ -150,9 +141,9 @@ def marcar_primeiro_carregamento():
     flag_path = DATA_DIR / "primeiro_carregamento.flag"
     try:
         flag_path.touch()
-        logger.info("✅ Primeiro carregamento finalizado. Flag criada.")
+        logger.info("Primeiro carregamento finalizado. Flag criada.")
     except Exception as e:
-        logger.error(f"❌ Erro ao criar flag de primeiro carregamento: {e}")
+        logger.error(f"Erro ao criar flag de primeiro carregamento: {e}")
 
 # === BOT SETUP ===
 class MyBot(discord.Client):
@@ -171,8 +162,8 @@ class MyBot(discord.Client):
         print("Comandos sincronizados com sucesso!")
 
     async def on_ready(self):
-        print(f"✅ O Bot {self.user} está online!")
-        logger.info(f"✅ O Bot {self.user} está online!")
+        print(f"O Bot {self.user} está online!")
+        logger.info(f"O Bot {self.user} está online!")
         self.gc = gspread.authorize(
             Credentials.from_service_account_file(PATH_CREDENTIALS, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
         )
@@ -187,28 +178,28 @@ class MyBot(discord.Client):
 
     async def on_member_join(self, member):
         """Envia mensagem de boas-vindas quando um novo membro entra no servidor."""
-        logger.info(f"👋 Novo membro entrou: {member} (ID: {getattr(member, 'id', 'unknown')})")
+        logger.info(f"Novo membro entrou: {member} (ID: {getattr(member, 'id', 'unknown')})")
         try:
             canal = self.get_channel(DISCORD_CHANNEL_GENERAL)
             if canal:
                 embed = discord.Embed(
                     title="Seja bem-vindo(a)!",
-                    description=f"Seja bem-vindo(a), {member.mention}! 🎉\n\nSinta-se em casa — confira os canais e as regras.",
+                    description=f"Seja bem-vindo(a), {member.mention}! \n\nSinta-se em casa — confira os canais e as regras.",
                     color=0x4CAF50,
                 )
                 embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
                 await canal.send(embed=embed)
-                logger.info(f"✅ Mensagem de boas-vindas enviada para {member} (ID: {member.id})")
+                logger.info(f"Mensagem de boas-vindas enviada para {member} (ID: {member.id})")
             else:
                 logger.warning("Canal de boas-vindas (DISCORD_CHANNEL_ID) não encontrado.")
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem de boas-vindas: {e}")
 
     async def monitorar_planilha(self):
-        print("📊 Monitorando planilha do Google Sheets...")
-        logger.info("📊 Monitorando planilha do Google Sheets...")
-        print(f"🔍 ID da planilha: {GOOGLE_SHEET_ID}")
-        logger.info(f"🔍 ID da planilha: {GOOGLE_SHEET_ID}")
+        print("Monitorando planilha do Google Sheets...")
+        logger.info("Monitorando planilha do Google Sheets...")
+        print(f"ID da planilha: {GOOGLE_SHEET_ID}")
+        logger.info(f"ID da planilha: {GOOGLE_SHEET_ID}")
 
         # Carrega dados salvos, se existirem
         self.sheet_data = self.carregar_estado()
@@ -216,33 +207,35 @@ class MyBot(discord.Client):
         while True:
             try:
                 self.ultima_verificacao = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-                print(f"\n⏳ Verificando planilha... {self.ultima_verificacao}")
-                logger.info(f"⏳ Verificando planilha... {self.ultima_verificacao}")
+                print(f"\nVerificando planilha... {self.ultima_verificacao}")
+                logger.info(f"Verificando planilha... {self.ultima_verificacao}")
                 data = self.sheet.get_all_records()
-                print(f"✅ Dados obtidos com sucesso! ({len(data)-1} linhas, excluindo cabeçalho)")
-                logger.info(f"✅ Dados obtidos com sucesso! ({len(data)-1} linhas)")
+                print(f"Dados obtidos com sucesso! ({len(data)-1} linhas, excluindo cabeçalho)")
+                logger.info(f"Dados obtidos com sucesso! ({len(data)-1} linhas)")
                 novos_dados = {}
 
                 # Buscar dados por posição das colunas em vez de nomes
                 data = self.sheet.get_all_values()  # Pega todos os valores brutos
                 if len(data) <= 1:  # Verifica se há dados além do cabeçalho
-                    print("⚠️ Planilha vazia ou contém apenas cabeçalho")
-                    logger.warning("⚠️ Planilha vazia ou contém apenas cabeçalho")
+                    print("Planilha vazia ou contém apenas cabeçalho")
+                    logger.warning("Planilha vazia ou contém apenas cabeçalho")
                     continue
 
                 # Pula a primeira linha (cabeçalho)
                 for idx, row in enumerate(data[1:], start=2):  # start=2 porque idx 1 é o cabeçalho
-                    # Verifica se a linha tem todas as colunas necessárias (A, B, C, D)
-                    if len(row) < 4:
+                    # Verifica se a linha tem pelo menos as colunas essenciais (A, B, C)
+                    if len(row) < 3:
                         continue
 
                     # A=0, B=1, C=2, D=3
                     codigo = row[0]  # Coluna A
                     nome = row[1]    # Coluna B
                     status = row[2]  # Coluna C
-                    regime_tributario = row[3]  # Coluna D
+                    regime_tributario = row[3] if len(row) > 3 else ""  # Coluna D (opcional)
 
-                    if not all([codigo, nome, status, regime_tributario]):  # Verifica se algum campo está vazio
+                    # Verifica campos obrigatórios (código, nome e status)
+                    # Regime tributário é opcional e pode ser adicionado depois
+                    if not all([codigo, nome, status]):
                         continue
 
                     codigo = str(codigo).strip()
@@ -256,14 +249,15 @@ class MyBot(discord.Client):
 
                     # Log se houver normalização
                     if status != status_bruto:
-                        logger.info(f"Status normalizado: '{status_bruto}' → '{status}' ({codigo})")
+                        logger.info(f"Status normalizado: '{status_bruto}' -> '{status}' ({codigo})")
                     if regime_tributario != regime_bruto:
-                        logger.info(f"Regime normalizado: '{regime_bruto}' → '{regime_tributario}' ({codigo})")
+                        logger.info(f"Regime normalizado: '{regime_bruto}' -> '{regime_tributario}' ({codigo})")
 
                     # Armazena em formato de dicionário (valores normalizados)
+                    # Permite regime vazio para empresas novas sem regime ainda definido
                     novos_dados[codigo] = {
                         "status": status,
-                        "regime_tributario": regime_tributario
+                        "regime_tributario": regime_tributario if regime_tributario else ""
                     }
 
                     # Verifica alterações ou novas empresas
@@ -274,11 +268,11 @@ class MyBot(discord.Client):
                         
                         # Verifica mudança de status
                         if status != status_anterior:
-                            print(f"\n🔄 Alteração detectada na linha {idx}:")
+                            print(f"\nAlteração detectada na linha {idx}:")
                             print(f"   Empresa: {codigo} - {nome}")
                             print(f"   Status anterior: {status_anterior}")
                             print(f"   Novo status: {status}")
-                            logger.info(f"🔄 Alteração detectada na linha {idx}: {codigo} - {nome} ({status_anterior} → {status})")
+                            logger.info(f"Alteração detectada na linha {idx}: {codigo} - {nome} ({status_anterior} -> {status})")
 
                             # Registra alteração no histórico
                             self.registrar_alteracao(
@@ -296,50 +290,66 @@ class MyBot(discord.Client):
                             elif status.upper() == "ATIVA" and eh_status_monitorado(status_anterior):
                                 await self.enviar_mensagem_reativacao(codigo, nome, status_anterior)
                             else:
-                                print(f"   ℹ️ Status não requer notificação: {status}")
+                                print(f"   Status não requer notificação: {status}")
                                 logger.info(f"Status não requer notificação: {status}")
                         
-                        # Verifica mudança de regime tributário (apenas notifica se houve mudança anterior)
-                        if regime_tributario != regime_anterior and regime_anterior:
-                            print(f"\n📋 Alteração de Regime Tributário detectada na linha {idx}:")
-                            print(f"   Empresa: {codigo} - {nome}")
-                            print(f"   Regime anterior: {regime_anterior}")
-                            print(f"   Novo regime: {regime_tributario}")
-                            logger.info(f"📋 Alteração de regime tributário na linha {idx}: {codigo} - {nome} ({regime_anterior} → {regime_tributario})")
+                        # Verifica mudança de regime tributário
+                        # Só processa se houver mudança real (desconsiderando variações de vazio)
+                        regime_anterior_valido = regime_anterior if regime_anterior else ""
+                        regime_novo_valido = regime_tributario if regime_tributario else ""
 
-                            # Registra alteração no histórico
-                            self.registrar_alteracao(
-                                tipo="regime_tributario",
-                                codigo=codigo,
-                                nome=nome,
-                                valor_anterior=regime_anterior,
-                                valor_novo=regime_tributario
-                            )
+                        if regime_novo_valido != regime_anterior_valido:
+                            if regime_anterior_valido:
+                                # Mudança de regime (já tinha um regime antes)
+                                print(f"\nAlteração de Regime Tributário detectada na linha {idx}:")
+                                print(f"   Empresa: {codigo} - {nome}")
+                                print(f"   Regime anterior: {regime_anterior_valido}")
+                                print(f"   Novo regime: {regime_novo_valido}")
+                                logger.info(f"Alteração de regime tributário na linha {idx}: {codigo} - {nome} ({regime_anterior_valido} -> {regime_novo_valido})")
 
-                            await self.enviar_mensagem_regime_tributario(codigo, nome, regime_anterior, regime_tributario)
-                        elif regime_tributario != regime_anterior and not regime_anterior:
-                            # Primeira detecção de regime - empresa já foi notificada como nova
-                            # Envia notificação de regime definido
-                            print(f"\n📋 Regime tributário definido na linha {idx}:")
-                            print(f"   Empresa: {codigo} - {nome}")
-                            print(f"   Regime tributário: {regime_tributario}")
-                            logger.info(f"📋 Regime tributário definido: {codigo} - {nome} (Regime: {regime_tributario})")
+                                # Registra alteração no histórico
+                                self.registrar_alteracao(
+                                    tipo="regime_tributario",
+                                    codigo=codigo,
+                                    nome=nome,
+                                    valor_anterior=regime_anterior_valido,
+                                    valor_novo=regime_novo_valido
+                                )
 
-                            if self.primeiro_carregamento_completo:
-                                await self.enviar_mensagem_regime_definido(codigo, nome, regime_tributario)
+                                if self.primeiro_carregamento_completo:
+                                    await self.enviar_mensagem_regime_tributario(codigo, nome, regime_anterior_valido, regime_novo_valido)
+                            elif regime_novo_valido and not regime_anterior_valido:
+                                # Regime definido pela primeira vez (empresa já existia, mas sem regime)
+                                # Só notifica se passou do primeiro carregamento
+                                print(f"\nRegime tributário definido na linha {idx}:")
+                                print(f"   Empresa: {codigo} - {nome}")
+                                print(f"   Regime tributário: {regime_novo_valido}")
+                                logger.info(f"Regime tributário definido: {codigo} - {nome} (Regime: {regime_novo_valido})")
+
+                                # Registra no histórico
+                                self.registrar_alteracao(
+                                    tipo="regime_tributario",
+                                    codigo=codigo,
+                                    nome=nome,
+                                    valor_anterior="Não definido",
+                                    valor_novo=regime_novo_valido
+                                )
+
+                                if self.primeiro_carregamento_completo:
+                                    await self.enviar_mensagem_regime_definido(codigo, nome, regime_novo_valido)
                     else:
                         # Nova empresa detectada - notifica imediatamente
-                        print(f"\n📝 Nova empresa detectada na linha {idx}:")
+                        print(f"\nNova empresa detectada na linha {idx}:")
                         print(f"   Empresa: {codigo} - {nome}")
                         print(f"   Status inicial: {status}")
                         print(f"   Regime tributário: {regime_tributario if regime_tributario else 'Não definido'}")
-                        logger.info(f"📝 Nova empresa detectada na linha {idx}: {codigo} - {nome} (Status: {status}, Regime: {regime_tributario if regime_tributario else 'Não definido'})")
+                        logger.info(f"Nova empresa detectada na linha {idx}: {codigo} - {nome} (Status: {status}, Regime: {regime_tributario if regime_tributario else 'Não definido'})")
 
                         # Só envia notificação se não for o primeiro carregamento
                         if self.primeiro_carregamento_completo:
                             await self.enviar_mensagem_nova_empresa(codigo, nome, status, regime_tributario)
                         else:
-                            logger.info(f"   ℹ️ Primeira carga: anotando {codigo} sem notificar Discord")
+                            logger.info(f"   Primeira carga: anotando {codigo} sem notificar Discord")
 
                 # Atualiza dados salvos
                 self.sheet_data = novos_dados
@@ -351,8 +361,8 @@ class MyBot(discord.Client):
                     self.primeiro_carregamento_completo = True
 
             except Exception as e:
-                print(f"❌ Erro ao monitorar planilha: {e}")
-                logger.error(f"❌ Erro ao monitorar planilha: {e}")
+                print(f"Erro ao monitorar planilha: {e}")
+                logger.error(f"Erro ao monitorar planilha: {e}")
 
             await asyncio.sleep(30)
 
@@ -366,12 +376,12 @@ class MyBot(discord.Client):
                     dados = json.load(f)
                     ultima_verificacao = dados.get("ultima_verificacao", "Nunca")
                     registros = dados.get("registros", {})
-                    print(f"🟢 Estado carregado ({len(registros)} registros).")
-                    print(f"📅 Última verificação: {ultima_verificacao}")
+                    print(f"Estado carregado ({len(registros)} registros).")
+                    print(f"Última verificação: {ultima_verificacao}")
                     return registros
             except Exception as e:
-                print(f"⚠️ Erro ao carregar estado: {e}")
-        print("🔹 Nenhum estado salvo encontrado. Criando novo...")
+                print(f"Erro ao carregar estado: {e}")
+        print("Nenhum estado salvo encontrado. Criando novo...")
         return {}
 
     def salvar_estado(self, dados):
@@ -389,11 +399,11 @@ class MyBot(discord.Client):
             backup_path = BACKUPS_DIR / f"estado_empresas_backup_{timestamp}.json"
             shutil.copy(caminho, backup_path)
 
-            print(f"💾 Estado salvo com sucesso em {estado_completo['ultima_verificacao']}")
-            logger.info(f"💾 Estado salvo com sucesso. Backup: {backup_path}")
+            print(f"Estado salvo com sucesso em {estado_completo['ultima_verificacao']}")
+            logger.info(f"Estado salvo com sucesso. Backup: {backup_path}")
         except Exception as e:
-            print(f"⚠️ Erro ao salvar estado: {e}")
-            logger.error(f"⚠️ Erro ao salvar estado: {e}")
+            print(f"Erro ao salvar estado: {e}")
+            logger.error(f"Erro ao salvar estado: {e}")
 
     def carregar_historico(self):
         """Carrega o histórico de alterações mensal."""
@@ -402,12 +412,12 @@ class MyBot(discord.Client):
             try:
                 with open(caminho, "r", encoding="utf-8") as f:
                     historico = json.load(f)
-                    print(f"📚 Histórico carregado ({len(historico)} competências).")
-                    logger.info(f"📚 Histórico carregado ({len(historico)} competências).")
+                    print(f"Histórico carregado ({len(historico)} competências).")
+                    logger.info(f"Histórico carregado ({len(historico)} competências).")
                     return historico
             except Exception as e:
-                print(f"⚠️ Erro ao carregar histórico: {e}")
-                logger.error(f"⚠️ Erro ao carregar histórico: {e}")
+                print(f"Erro ao carregar histórico: {e}")
+                logger.error(f"Erro ao carregar histórico: {e}")
         return {}
 
     def salvar_historico(self):
@@ -416,10 +426,10 @@ class MyBot(discord.Client):
         try:
             with open(caminho, "w", encoding="utf-8") as f:
                 json.dump(self.historico_alteracoes, f, indent=4, ensure_ascii=False)
-            logger.info("📚 Histórico salvo com sucesso.")
+            logger.info("Histórico salvo com sucesso.")
         except Exception as e:
-            print(f"⚠️ Erro ao salvar histórico: {e}")
-            logger.error(f"⚠️ Erro ao salvar histórico: {e}")
+            print(f"Erro ao salvar histórico: {e}")
+            logger.error(f"Erro ao salvar histórico: {e}")
 
     def registrar_alteracao(self, tipo, codigo, nome, valor_anterior, valor_novo):
         """Registra uma alteração no histórico mensal."""
@@ -456,13 +466,13 @@ class MyBot(discord.Client):
         # Salva o histórico
         self.salvar_historico()
 
-        logger.info(f"📝 Alteração registrada: {tipo} - {codigo} - {nome} (Competência: {competencia})")
+        logger.info(f"Alteração registrada: {tipo} - {codigo} - {nome} (Competência: {competencia})")
 
     async def verificar_relatorio_mensal(self):
         """Verifica diariamente se deve enviar o relatório mensal."""
         await self.wait_until_ready()
-        print(f"📅 Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL})")
-        logger.info(f"📅 Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL})")
+        print(f"Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL})")
+        logger.info(f"Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL})")
 
         while not self.is_closed():
             try:
@@ -472,8 +482,8 @@ class MyBot(discord.Client):
                 if agora.day == DIA_RELATORIO_MENSAL:
                     # Verifica se já enviou hoje
                     if self.ultimo_relatorio_enviado != agora.date():
-                        print(f"\n📊 Gerando relatório mensal...")
-                        logger.info("📊 Gerando relatório mensal...")
+                        print(f"\nGerando relatório mensal...")
+                        logger.info("Gerando relatório mensal...")
 
                         # Envia relatório do mês anterior
                         mes_anterior = (agora.replace(day=1) - timedelta(days=1))
@@ -482,12 +492,12 @@ class MyBot(discord.Client):
                         await self.enviar_relatorio_mensal(competencia)
                         self.ultimo_relatorio_enviado = agora.date()
 
-                        print(f"✅ Relatório mensal enviado!")
-                        logger.info("✅ Relatório mensal enviado!")
+                        print(f"Relatório mensal enviado!")
+                        logger.info("Relatório mensal enviado!")
 
             except Exception as e:
-                print(f"❌ Erro ao verificar relatório mensal: {e}")
-                logger.error(f"❌ Erro ao verificar relatório mensal: {e}")
+                print(f"Erro ao verificar relatório mensal: {e}")
+                logger.error(f"Erro ao verificar relatório mensal: {e}")
 
             # Verifica a cada 1 hora
             await asyncio.sleep(3600)
@@ -497,7 +507,7 @@ class MyBot(discord.Client):
         canal = self.get_channel(DISCORD_CHANNEL_ID)
 
         if competencia not in self.historico_alteracoes:
-            print(f"⚠️ Nenhuma alteração registrada para a competência {competencia}")
+            print(f"Nenhuma alteração registrada para a competência {competencia}")
             return
 
         dados = self.historico_alteracoes[competencia]
@@ -518,14 +528,14 @@ class MyBot(discord.Client):
 
         # Cria o embed principal
         embed = discord.Embed(
-            title=f"📊 Relatório Mensal - {mes_nome}",
+            title=f"Relatório Mensal - {mes_nome}",
             description=f"Resumo das alterações registradas no período",
             color=0x2196F3
         )
 
         # Estatísticas gerais
         embed.add_field(
-            name="📈 Estatísticas Gerais",
+            name="Estatísticas Gerais",
             value=f"**Total de Alterações:** {stats['total_alteracoes']}\n"
                   f"**Alterações de Status:** {stats['alteracoes_status']}\n"
                   f"**Alterações de Regime:** {stats['alteracoes_regime']}",
@@ -555,15 +565,15 @@ class MyBot(discord.Client):
 
         if empresas_texto:
             embed.add_field(
-                name=f"🏢 Empresas Alteradas ({len(empresas_alteradas)})",
+                name=f"Empresas Alteradas ({len(empresas_alteradas)})",
                 value="\n".join(empresas_texto),
                 inline=False
             )
 
-        embed.set_footer(text=f"CANELLA & SANTOS CONTABILIDADE EIRELI • Competência: {competencia}")
+        embed.set_footer(text=f"CANELLA & SANTOS CONTABILIDADE EIRELI * Competência: {competencia}")
 
         await canal.send("@everyone", embed=embed)
-        logger.info(f"📨 Relatório mensal enviado: {competencia}")
+        logger.info(f"Relatório mensal enviado: {competencia}")
 
         # Se houver muitas alterações, cria um arquivo detalhado
         if stats['total_alteracoes'] > 20:
@@ -581,7 +591,7 @@ class MyBot(discord.Client):
         }
         
         embed = discord.Embed(
-            title="⚠️ Alteração de Status - Empresa",
+            title="Alteração de Status - Empresa",
             description=f"**{codigo}** - {nome}",
             color=cores.get(status, 0x2196F3)
         )
@@ -591,8 +601,8 @@ class MyBot(discord.Client):
         embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
         
         await canal.send("@everyone", embed=embed)
-        logger.info(f"📨 Mensagem enviada: {codigo} - {nome} → {status}")
-        print(f"📨 Mensagem enviada: {codigo} - {nome} → {status}")
+        logger.info(f"Mensagem enviada: {codigo} - {nome} -> {status}")
+        print(f"Mensagem enviada: {codigo} - {nome} -> {status}")
 
     async def enviar_mensagem_nova_empresa(self, codigo, nome, status, regime_tributario=""):
         canal = self.get_channel(DISCORD_CHANNEL_ID)
@@ -609,9 +619,9 @@ class MyBot(discord.Client):
         embed.add_field(name="\u200b", value="\u200b", inline=True)  # Campo vazio para padronizar
         embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
 
-        await canal.send(embed=embed)
-        logger.info(f"📨 Mensagem de nova empresa enviada: {codigo} - {nome}")
-        print(f"📨 Mensagem de nova empresa enviada: {codigo} - {nome} ({status_display})")
+        await canal.send("@everyone", embed=embed)
+        logger.info(f"Mensagem de nova empresa enviada: {codigo} - {nome}")
+        print(f"Mensagem de nova empresa enviada: {codigo} - {nome} ({status_display})")
 
     async def enviar_mensagem_reativacao(self, codigo, nome, status_anterior):
         """Envia notificação quando empresa volta a ficar ATIVA."""
@@ -628,7 +638,7 @@ class MyBot(discord.Client):
         status_desc, _ = status_info.get(status_anterior, (status_anterior, 0x4CAF50))
 
         embed = discord.Embed(
-            title="✅ Empresa Reativada",
+            title="Empresa Reativada",
             description=f"**{codigo}** - {nome}",
             color=0x4CAF50  # Verde para reativação
         )
@@ -639,12 +649,12 @@ class MyBot(discord.Client):
         )
         embed.add_field(
             name="Novo Status",
-            value=f"**ATIVA** ✅",
+            value=f"**ATIVA** ",
             inline=True
         )
         embed.add_field(name="Data/Hora", value=self.ultima_verificacao, inline=False)
         embed.add_field(
-            name="ℹ️ Informação",
+            name="Informação",
             value=f"Empresa voltou ao status ativo após estar {status_desc.lower()}.",
             inline=False
         )
@@ -652,8 +662,8 @@ class MyBot(discord.Client):
         embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
 
         await canal.send("@everyone", embed=embed)
-        logger.info(f"📨 Mensagem de reativação enviada: {codigo} - {nome} ({status_anterior} → ATIVA)")
-        print(f"📨 Mensagem de reativação enviada: {codigo} - {nome} ({status_anterior} → ATIVA)")
+        logger.info(f"Mensagem de reativação enviada: {codigo} - {nome} ({status_anterior} -> ATIVA)")
+        print(f"Mensagem de reativação enviada: {codigo} - {nome} ({status_anterior} -> ATIVA)")
 
     async def enviar_mensagem_regime_tributario(self, codigo, nome, regime_anterior, regime_novo):
         """Envia notificação quando há mudança de regime tributário."""
@@ -676,7 +686,7 @@ class MyBot(discord.Client):
         regime_anterior_nome = regimes_map.get(regime_anterior, (regime_anterior, 0x2196F3))[0]
         
         embed = discord.Embed(
-            title="📋 Alteração de Regime Tributário",
+            title="Alteração de Regime Tributário",
             description=f"**{codigo}** - {nome}",
             color=cor
         )
@@ -692,7 +702,7 @@ class MyBot(discord.Client):
         )
         embed.add_field(name="Data/Hora", value=self.ultima_verificacao, inline=False)
         embed.add_field(
-            name="⚠️ Ação Necessária",
+            name="Ação Necessária",
             value="Revisar documentação e conformidade legal.",
             inline=False
         )
@@ -700,8 +710,8 @@ class MyBot(discord.Client):
         embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
         
         await canal.send("@everyone", embed=embed)
-        logger.info(f"📨 Notificação de regime tributário enviada: {codigo} - {nome} ({regime_anterior} → {regime_novo})")
-        print(f"📨 Notificação de regime tributário: {codigo} - {nome} ({regime_anterior} → {regime_novo})")
+        logger.info(f"Notificação de regime tributário enviada: {codigo} - {nome} ({regime_anterior} -> {regime_novo})")
+        print(f"Notificação de regime tributário: {codigo} - {nome} ({regime_anterior} -> {regime_novo})")
 
     async def enviar_mensagem_regime_definido(self, codigo, nome, regime_tributario):
         """Envia notificação quando o regime tributário é definido pela primeira vez."""
@@ -723,7 +733,7 @@ class MyBot(discord.Client):
         regime_nome, cor = regimes_map.get(regime_tributario, (regime_tributario, 0x2196F3))
 
         embed = discord.Embed(
-            title="📋 Regime Tributário Definido",
+            title="Regime Tributário Definido",
             description=f"**{codigo}** - {nome}",
             color=cor
         )
@@ -737,8 +747,8 @@ class MyBot(discord.Client):
         embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
 
         await canal.send(embed=embed)
-        logger.info(f"📨 Notificação de regime definido enviada: {codigo} - {nome} (Regime: {regime_tributario})")
-        print(f"📨 Notificação de regime definido: {codigo} - {nome} (Regime: {regime_tributario})")
+        logger.info(f"Notificação de regime definido enviada: {codigo} - {nome} (Regime: {regime_tributario})")
+        print(f"Notificação de regime definido: {codigo} - {nome} (Regime: {regime_tributario})")
 
 
 # === COMANDOS MANUAIS ===
@@ -747,7 +757,7 @@ bot = MyBot()
 @bot.tree.command(name="help", description="Mostra todos os comandos disponíveis")
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="📚 Comandos Disponíveis",
+        title="Comandos Disponíveis",
         description="Lista de todos os comandos do bot",
         color=0x2196F3
     )
@@ -767,8 +777,8 @@ async def help_command(interaction: discord.Interaction):
     embed.add_field(
         name="/relatorio [mes] [ano]",
         value="Gera relatório mensal de alterações\n"
-              "• Sem parâmetros: mês atual\n"
-              "• Com parâmetros: mês/ano específico\n"
+              "* Sem parâmetros: mês atual\n"
+              "* Com parâmetros: mês/ano específico\n"
               "Exemplo: `/relatorio 11 2024`",
         inline=False
     )
@@ -781,11 +791,11 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
-        name="ℹ️ Notificações Automáticas",
-        value="• ⚠️ Quando empresa fica INATIVA/BAIXA/DEVOLVIDA/SUSPENSA\n"
-              "• ✅ Quando empresa volta a ficar ATIVA\n"
-              "• 📋 Quando há mudança de regime tributário\n"
-              f"• 📊 Relatório mensal automático (dia {DIA_RELATORIO_MENSAL})",
+        name="Notificações Automáticas",
+        value="* Quando empresa fica INATIVA/BAIXA/DEVOLVIDA/SUSPENSA\n"
+              "* Quando empresa volta a ficar ATIVA\n"
+              "* Quando há mudança de regime tributário\n"
+              f"* Relatório mensal automático (dia {DIA_RELATORIO_MENSAL})",
         inline=False
     )
 
@@ -797,7 +807,7 @@ async def help_command(interaction: discord.Interaction):
 @bot.tree.command(name="ping", description="Responde com Pong!")
 async def ping(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🏓 Pong!",
+        title="Pong!",
         description=f"Latência: {bot.latency * 1000:.2f}ms",
         color=0x00FF00
     )
@@ -806,7 +816,7 @@ async def ping(interaction: discord.Interaction):
 @bot.tree.command(name="status", description="Status do bot e informações de monitoramento")
 async def status(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="📊 Status do Bot",
+        title="Status do Bot",
         color=0x00FF00
     )
     embed.add_field(
@@ -821,7 +831,7 @@ async def status(interaction: discord.Interaction):
     )
     embed.add_field(
         name="Status",
-        value="**✅ Online**",
+        value="**Online**",
         inline=True
     )
     embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
@@ -853,7 +863,7 @@ async def relatorio(interaction: discord.Interaction, mes: int = None, ano: int 
         else:
             # Valida o mês
             if mes < 1 or mes > 12:
-                await interaction.followup.send("❌ Mês inválido! Use um valor entre 1 e 12.")
+                await interaction.followup.send("Mês inválido! Use um valor entre 1 e 12.")
                 return
 
             competencia = f"{ano}-{mes:02d}"
@@ -861,7 +871,7 @@ async def relatorio(interaction: discord.Interaction, mes: int = None, ano: int 
         # Verifica se há dados para a competência
         if competencia not in bot.historico_alteracoes:
             await interaction.followup.send(
-                f"⚠️ Nenhuma alteração registrada para a competência {competencia}."
+                f"Nenhuma alteração registrada para a competência {competencia}."
             )
             logger.info(f"Comando /relatorio executado por {interaction.user} - Sem dados para {competencia}")
             return
@@ -870,12 +880,12 @@ async def relatorio(interaction: discord.Interaction, mes: int = None, ano: int 
         await bot.enviar_relatorio_mensal(competencia)
 
         await interaction.followup.send(
-            f"✅ Relatório da competência {competencia} enviado com sucesso!"
+            f"Relatório da competência {competencia} enviado com sucesso!"
         )
         logger.info(f"Comando /relatorio executado por {interaction.user} - Competência: {competencia}")
 
     except Exception as e:
-        await interaction.followup.send(f"❌ Erro ao gerar relatório: {str(e)}")
+        await interaction.followup.send(f"Erro ao gerar relatório: {str(e)}")
         logger.error(f"Erro no comando /relatorio: {e}")
 
 @bot.tree.command(name="historico", description="Mostra competências com alterações registradas")
@@ -883,11 +893,11 @@ async def historico(interaction: discord.Interaction):
     """Mostra as competências que têm alterações registradas."""
 
     if not bot.historico_alteracoes:
-        await interaction.response.send_message("📚 Nenhum histórico de alterações registrado ainda.")
+        await interaction.response.send_message("Nenhum histórico de alterações registrado ainda.")
         return
 
     embed = discord.Embed(
-        title="📚 Histórico de Alterações",
+        title="Histórico de Alterações",
         description="Competências com alterações registradas",
         color=0x9C27B0
     )
@@ -905,7 +915,7 @@ async def historico(interaction: discord.Interaction):
         mes_nome = data_comp.strftime("%B/%Y")
 
         embed.add_field(
-            name=f"📅 {mes_nome}",
+            name=f"{mes_nome}",
             value=f"**{stats['total_alteracoes']}** alterações\n"
                   f"└ {stats['alteracoes_status']} status\n"
                   f"└ {stats['alteracoes_regime']} regimes",

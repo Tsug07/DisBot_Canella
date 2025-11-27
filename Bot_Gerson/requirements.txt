@@ -1,0 +1,7 @@
+discord.py==2.3.2
+python-dotenv==1.0.0
+gspread>=5.10.0
+google-auth>=2.20.0
+customtkinter>=5.2.0
+pystray>=0.19.4
+Pillow>=10.0.0
