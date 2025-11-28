@@ -221,6 +221,12 @@ async def email_monitor():
 
         logger.info(f">> Total de notificacoes coletadas: {len(notifications)}")
 
+        # Envia mensagem separadora com data e hora se houver notificações
+        if notifications:
+            agora = datetime.now().strftime('%d/%m/%Y - %H:%M:%S')
+            await channel.send(f"**📬 Notificações DEC [{agora}]**")
+            logger.info(f">> Mensagem separadora enviada: Notificações DEC [{agora}]")
+
         enviadas = 0
         ignoradas = 0
 
