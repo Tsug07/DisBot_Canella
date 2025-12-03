@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 import logging
 import shutil
 from pathlib import Path
+import sys
+import atexit
 
 # === CONFIGURAÇÃO DE CAMINHOS ===
 # Define o diretório base do bot (onde está o main.py)
@@ -125,6 +127,57 @@ def eh_status_monitorado(status):
 
     # Verifica se o status normalizado está na lista de monitorados
     return status_normalizado in STATUS_MONITORADOS
+
+# === FUNÇÕES DE CONTROLE DE LOCKFILE ===
+LOCKFILE_PATH = DATA_DIR / "bot_gerson.lock"
+
+def criar_lockfile():
+    """Cria o arquivo de lock com o PID do processo."""
+    try:
+        if LOCKFILE_PATH.exists():
+            # Verifica se o processo ainda está rodando
+            with open(LOCKFILE_PATH, 'r') as f:
+                old_pid = int(f.read().strip())
+
+            # Tenta verificar se o processo existe (funciona no Windows e Linux)
+            try:
+                if sys.platform == "win32":
+                    import psutil
+                    if psutil.pid_exists(old_pid):
+                        logger.error(f"Bot já está rodando (PID: {old_pid}). Encerrando...")
+                        print(f"ERRO: Bot_Gerson já está em execução (PID: {old_pid})")
+                        sys.exit(1)
+                else:
+                    os.kill(old_pid, 0)  # Não mata o processo, apenas verifica
+                    logger.error(f"Bot já está rodando (PID: {old_pid}). Encerrando...")
+                    print(f"ERRO: Bot_Gerson já está em execução (PID: {old_pid})")
+                    sys.exit(1)
+            except (ProcessLookupError, OSError, ImportError):
+                # Processo não existe mais, pode remover o lockfile antigo
+                logger.warning(f"Lockfile antigo encontrado (PID: {old_pid}), mas processo não existe. Removendo...")
+                LOCKFILE_PATH.unlink()
+
+        # Cria novo lockfile com o PID atual
+        with open(LOCKFILE_PATH, 'w') as f:
+            f.write(str(os.getpid()))
+
+        logger.info(f"Lockfile criado com sucesso (PID: {os.getpid()})")
+
+        # Registra função para remover lockfile ao encerrar
+        atexit.register(remover_lockfile)
+
+    except Exception as e:
+        logger.error(f"Erro ao criar lockfile: {e}")
+        sys.exit(1)
+
+def remover_lockfile():
+    """Remove o arquivo de lock ao encerrar o bot."""
+    try:
+        if LOCKFILE_PATH.exists():
+            LOCKFILE_PATH.unlink()
+            logger.info("Lockfile removido com sucesso")
+    except Exception as e:
+        logger.error(f"Erro ao remover lockfile: {e}")
 
 # === FUNÇÕES DE CONTROLE DE PRIMEIRO CARREGAMENTO ===
 def verificar_primeiro_carregamento():
@@ -941,4 +994,16 @@ async def historico(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
     logger.info(f"Comando /historico executado por {interaction.user}")
 
-bot.run(DISCORD_TOKEN)
+# === INICIALIZAÇÃO DO BOT ===
+if __name__ == "__main__":
+    # Cria lockfile para evitar múltiplas instâncias
+    criar_lockfile()
+
+    try:
+        bot.run(DISCORD_TOKEN)
+    except KeyboardInterrupt:
+        logger.info("Bot encerrado pelo usuário")
+    except Exception as e:
+        logger.error(f"Erro fatal ao executar o bot: {e}")
+    finally:
+        remover_lockfile()
