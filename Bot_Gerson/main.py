@@ -538,8 +538,8 @@ class MyBot(discord.Client):
     async def verificar_relatorio_mensal(self):
         """Verifica diariamente se deve enviar o relatório mensal."""
         await self.wait_until_ready()
-        print(f"Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL})")
-        logger.info(f"Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL})")
+        print(f"Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL}, Horário: 09:00)")
+        logger.info(f"Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL}, Horário: 09:00)")
 
         while not self.is_closed():
             try:
@@ -547,8 +547,8 @@ class MyBot(discord.Client):
 
                 # Verifica se é o dia de enviar o relatório
                 if agora.day == DIA_RELATORIO_MENSAL:
-                    # Verifica se já enviou hoje
-                    if self.ultimo_relatorio_enviado != agora.date():
+                    # Verifica se já enviou hoje e se já são 9 horas da manhã
+                    if self.ultimo_relatorio_enviado != agora.date() and agora.hour >= 9:
                         print(f"\nGerando relatório mensal...")
                         logger.info("Gerando relatório mensal...")
 
