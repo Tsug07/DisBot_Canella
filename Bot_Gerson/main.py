@@ -813,7 +813,7 @@ class MyBot(discord.Client):
         embed.add_field(name="\u200b", value="\u200b", inline=True)
         embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
 
-        await canal.send(embed=embed)
+        await canal.send("@everyone", embed=embed)
         logger.info(f"Notificação de regime definido enviada: {codigo} - {nome} (Regime: {regime_tributario})")
         print(f"Notificação de regime definido: {codigo} - {nome} (Regime: {regime_tributario})")
 

@@ -66,32 +66,67 @@ class BotManager(ctk.CTk):
         self.setup_ui()
         self.check_autostart_status()
 
-        # Verifica se já existe um bot rodando ANTES de tentar iniciar
-        bot_already_running = False
-        if os.path.exists(self.pid_file):
-            try:
-                with open(self.pid_file, 'r') as f:
-                    pid = int(f.read().strip())
-                try:
-                    os.kill(pid, 0)
-                    bot_already_running = True
-                except (OSError, PermissionError):
-                    os.remove(self.pid_file)
-            except:
-                pass
+        # Limpa processos órfãos do bot antes de iniciar
+        self.cleanup_orphan_processes()
 
+        # Verifica se já existe um bot rodando
         self.check_detached_bot()
+
         self.create_tray_icon()  # Cria ícone na bandeja do sistema
 
         # Inicia minimizado na bandeja
         self.withdraw()  # Esconde a janela principal
 
-        # Inicia o bot automaticamente apenas se não estava rodando antes
-        if not bot_already_running:
+        # Inicia o bot automaticamente se ainda não estiver rodando
+        if not self.is_running:
             self.after(1000, self.start_bot)  # Delay de 1 segundo para UI carregar
 
         # Mostra notificação de inicialização na bandeja
         self.after(2000, self.show_tray_notification)
+
+    def cleanup_orphan_processes(self):
+        """Limpa processos órfãos do bot que ficaram rodando após desligamento inesperado"""
+        try:
+            import psutil
+
+            # Nome do processo do bot (rebecca_bot.py rodando via python)
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            main_path = os.path.join(script_dir, "rebecca_bot.py")
+
+            killed_count = 0
+
+            # Procura por processos Python rodando o rebecca_bot.py
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    cmdline = proc.info.get('cmdline')
+                    if cmdline and len(cmdline) >= 2:
+                        # Verifica se é um processo Python rodando nosso rebecca_bot.py
+                        if 'python' in cmdline[0].lower() and main_path.lower() in ' '.join(cmdline).lower():
+                            # Mata o processo órfão
+                            proc.kill()
+                            killed_count += 1
+                            self.log(f"Processo órfão eliminado (PID: {proc.info['pid']})")
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    pass
+
+            # Limpa o arquivo PID se existir
+            if os.path.exists(self.pid_file):
+                os.remove(self.pid_file)
+                self.log("Arquivo PID limpo")
+
+            if killed_count > 0:
+                self.log(f"Total de {killed_count} processo(s) órfão(s) eliminado(s)")
+            else:
+                self.log("Nenhum processo órfão encontrado")
+
+        except ImportError:
+            # Se psutil não estiver instalado, faz limpeza básica apenas do arquivo PID
+            self.log("AVISO: psutil não encontrado, fazendo limpeza básica")
+            if os.path.exists(self.pid_file):
+                os.remove(self.pid_file)
+                self.log("Arquivo PID limpo")
+        except Exception as e:
+            self.log(f"Erro ao limpar processos órfãos: {str(e)}")
 
     def create_tray_icon(self):
         """Cria o ícone na bandeja do sistema"""
