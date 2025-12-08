@@ -258,26 +258,41 @@ class MyBot(discord.Client):
         logger.info("Monitorando planilha do Google Sheets...")
         print(f"ID da planilha: {GOOGLE_SHEET_ID}")
         logger.info(f"ID da planilha: {GOOGLE_SHEET_ID}")
+        print("Horários de verificação: 09:00, 11:00, 13:00, 15:00")
+        logger.info("Horários de verificação: 09:00, 11:00, 13:00, 15:00")
 
         # Carrega dados salvos, se existirem
         self.sheet_data = self.carregar_estado()
 
+        # Horários de verificação
+        HORARIOS_VERIFICACAO = [9, 11, 13, 15]
+        ultima_hora_verificada = None
+
         while True:
             try:
-                self.ultima_verificacao = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
-                print(f"\nVerificando planilha... {self.ultima_verificacao}")
-                logger.info(f"Verificando planilha... {self.ultima_verificacao}")
+                agora = datetime.now()
+                hora_atual = agora.hour
 
-                # Executa a chamada síncrona em thread separada para não bloquear o loop
-                data = await asyncio.to_thread(self.sheet.get_all_values)
+                # Verifica se está em um horário de verificação e se ainda não verificou nesta hora
+                if hora_atual in HORARIOS_VERIFICACAO and ultima_hora_verificada != hora_atual:
+                    self.ultima_verificacao = agora.strftime('%d/%m/%Y %H:%M:%S')
+                    print(f"\n{'='*60}")
+                    print(f"Verificação agendada - {self.ultima_verificacao}")
+                    print(f"{'='*60}")
+                    logger.info(f"Verificação agendada - {self.ultima_verificacao}")
 
-                print(f"Dados obtidos com sucesso! ({len(data)} linhas)")
-                logger.info(f"Dados obtidos com sucesso! ({len(data)} linhas)")
-                novos_dados = {}
-                if len(data) <= 1:  # Verifica se há dados além do cabeçalho
-                    print("Planilha vazia ou contém apenas cabeçalho")
-                    logger.warning("Planilha vazia ou contém apenas cabeçalho")
-                    continue
+                    # Executa a chamada síncrona em thread separada para não bloquear o loop
+                    data = await asyncio.to_thread(self.sheet.get_all_values)
+
+                    print(f"Dados obtidos com sucesso! ({len(data)} linhas)")
+                    logger.info(f"Dados obtidos com sucesso! ({len(data)} linhas)")
+                    novos_dados = {}
+                    if len(data) <= 1:  # Verifica se há dados além do cabeçalho
+                        print("Planilha vazia ou contém apenas cabeçalho")
+                        logger.warning("Planilha vazia ou contém apenas cabeçalho")
+                        ultima_hora_verificada = hora_atual
+                        await asyncio.sleep(300)  # Aguarda 5 minutos antes de verificar novamente
+                        continue
 
                 # Pula a primeira linha (cabeçalho)
                 for idx, row in enumerate(data[1:], start=2):  # start=2 porque idx 1 é o cabeçalho
@@ -357,8 +372,15 @@ class MyBot(discord.Client):
                         regime_novo_valido = regime_tributario if regime_tributario else ""
 
                         if regime_novo_valido != regime_anterior_valido:
-                            if regime_anterior_valido:
-                                # Mudança de regime (já tinha um regime antes)
+                            # PROTEÇÃO: Ignora mudanças temporárias para/de vazio se regime anterior existia
+                            # Isso evita falsos positivos causados por leituras incompletas do Sheets
+                            if regime_anterior_valido and not regime_novo_valido:
+                                # Regime sumiu (provavelmente leitura temporária incompleta) - IGNORA
+                                logger.warning(f"Regime vazio detectado temporariamente: {codigo} - {nome} (era {regime_anterior_valido}). Ignorando...")
+                                continue
+
+                            if regime_anterior_valido and regime_novo_valido:
+                                # Mudança de regime (já tinha um regime antes e tem um novo diferente)
                                 print(f"\nAlteração de Regime Tributário detectada na linha {idx}:")
                                 print(f"   Empresa: {codigo} - {nome}")
                                 print(f"   Regime anterior: {regime_anterior_valido}")
@@ -409,23 +431,41 @@ class MyBot(discord.Client):
                         else:
                             logger.info(f"   Primeira carga: anotando {codigo} sem notificar Discord")
 
-                # Atualiza dados salvos
-                self.sheet_data = novos_dados
-                await self.salvar_estado(novos_dados)
-                
-                # Se for a primeira carga, marca como completa APÓS salvar tudo
-                if not self.primeiro_carregamento_completo:
-                    marcar_primeiro_carregamento()
-                    self.primeiro_carregamento_completo = True
+                    # Atualiza dados salvos
+                    self.sheet_data = novos_dados
+                    await self.salvar_estado(novos_dados)
+
+                    # Se for a primeira carga, marca como completa APÓS salvar tudo
+                    if not self.primeiro_carregamento_completo:
+                        marcar_primeiro_carregamento()
+                        self.primeiro_carregamento_completo = True
+
+                    # Marca esta hora como verificada
+                    ultima_hora_verificada = hora_atual
+                    print(f"{'='*60}")
+                    print(f"Verificação concluída às {agora.strftime('%H:%M:%S')}")
+                    print(f"Próxima verificação: {self._proxima_verificacao(hora_atual)}")
+                    print(f"{'='*60}\n")
+                    logger.info(f"Verificação concluída. Próxima: {self._proxima_verificacao(hora_atual)}")
 
             except Exception as e:
                 print(f"Erro ao monitorar planilha: {e}")
                 logger.error(f"Erro ao monitorar planilha: {e}")
 
-            await asyncio.sleep(150)  # 2.5 minutos - equilíbrio entre responsividade e eficiência
+            # Verifica a cada 5 minutos se está na hora de executar
+            await asyncio.sleep(300)
 
 
     # === Funções auxiliares ===
+    def _proxima_verificacao(self, hora_atual):
+        """Calcula o horário da próxima verificação."""
+        HORARIOS_VERIFICACAO = [9, 11, 13, 15]
+        for hora in HORARIOS_VERIFICACAO:
+            if hora > hora_atual:
+                return f"{hora:02d}:00"
+        # Se passou de todas as horas de hoje, retorna a primeira de amanhã
+        return "09:00 (amanhã)"
+
     def carregar_estado(self):
         caminho = DATA_DIR / "estado_empresas.json"
         if caminho.exists():
@@ -547,10 +587,12 @@ class MyBot(discord.Client):
 
                 # Verifica se é o dia de enviar o relatório
                 if agora.day == DIA_RELATORIO_MENSAL:
-                    # Verifica se já enviou hoje e se já são 9 horas da manhã
-                    if self.ultimo_relatorio_enviado != agora.date() and agora.hour >= 9:
-                        print(f"\nGerando relatório mensal...")
-                        logger.info("Gerando relatório mensal...")
+                    # Verifica se ainda não enviou hoje e se já são 9 horas da manhã
+                    if self.ultimo_relatorio_enviado != agora.date() and agora.hour == 9:
+                        print(f"\n{'='*60}")
+                        print(f"Gerando relatório mensal automático...")
+                        print(f"{'='*60}")
+                        logger.info("Gerando relatório mensal automático...")
 
                         # Envia relatório do mês anterior
                         mes_anterior = (agora.replace(day=1) - timedelta(days=1))
@@ -559,22 +601,40 @@ class MyBot(discord.Client):
                         await self.enviar_relatorio_mensal(competencia)
                         self.ultimo_relatorio_enviado = agora.date()
 
-                        print(f"Relatório mensal enviado!")
-                        logger.info("Relatório mensal enviado!")
+                        print(f"{'='*60}")
+                        print(f"Relatório mensal enviado com sucesso!")
+                        print(f"Competência: {competencia}")
+                        print(f"{'='*60}\n")
+                        logger.info(f"Relatório mensal enviado! Competência: {competencia}")
 
             except Exception as e:
                 print(f"Erro ao verificar relatório mensal: {e}")
                 logger.error(f"Erro ao verificar relatório mensal: {e}")
 
-            # Verifica a cada 1 hora
-            await asyncio.sleep(3600)
+            # Verifica a cada 30 minutos (mais frequente para garantir que pega às 09:00)
+            await asyncio.sleep(1800)
 
     async def enviar_relatorio_mensal(self, competencia):
         """Envia o relatório mensal de alterações."""
         canal = self.get_channel(DISCORD_CHANNEL_ID)
 
+        if not canal:
+            logger.error("Canal do Discord não encontrado para envio do relatório mensal")
+            print("ERRO: Canal do Discord não encontrado")
+            return
+
         if competencia not in self.historico_alteracoes:
             print(f"Nenhuma alteração registrada para a competência {competencia}")
+            logger.warning(f"Sem alterações para relatório: {competencia}")
+
+            # Envia mensagem informando que não houve alterações
+            embed = discord.Embed(
+                title=f"📊 Relatório Mensal - {competencia}",
+                description=f"Nenhuma alteração registrada nesta competência.",
+                color=0x9E9E9E
+            )
+            embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
+            await canal.send("@everyone", embed=embed)
             return
 
         dados = self.historico_alteracoes[competencia]
