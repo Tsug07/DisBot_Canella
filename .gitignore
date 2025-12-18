@@ -23,6 +23,7 @@ Bot_*/backups/
 Bot_*/bot_config.json
 Bot_*/*.pid
 Bot_*/rebecca_bot.pid
+Bot_*/bot_rebecca.lock
 Bot_*/gerson_bot.pid
 
 # Arquivos de setup gerados localmente

@@ -55,6 +55,12 @@ MAPEAMENTO_STATUS = {
     # Status normais
     "ATIVA": "ATIVA",
     "ATIVO": "ATIVA",
+    "ATIVA (CONSULTORIA)": "ATIVA",
+    "ATIVO (CONSULTORIA)": "ATIVA",
+    "ATIVA (LEGALIZAÇÃO)": "ATIVA",
+    "ATIVO (LEGALIZAÇÃO)": "ATIVA",
+    "ATIVA (MANUTENÇÃO)": "ATIVA",
+    "ATIVO (MANUTENÇÃO)": "ATIVA",
     "INATIVA": "INATIVA",
     "INATIVO": "INATIVA",  # Normaliza INATIVO para INATIVA
     "BAIXA": "BAIXA",
@@ -64,6 +70,11 @@ MAPEAMENTO_STATUS = {
     "SUSPENSA RFB": "SUSPENSA",  # Variação
     "SUSPENSA-RFB": "SUSPENSA",
     "SUSPENSA_RFB": "SUSPENSA",
+    "SUSPENSA (MANUTENÇÃO)": "SUSPENSA",
+    "SUSPENSA MANUTENÇÃO": "SUSPENSA",
+    "SUSPENSA (LEGALIZAÇÃO)": "SUSPENSA",
+    "SUSPENSA LEGALIZAÇÃO": "SUSPENSA",
+    
 
     # Regimes como status (quando aparecem na coluna de status)
     "SN": "SN",
@@ -241,12 +252,37 @@ class MyBot(discord.Client):
             canal = self.get_channel(DISCORD_CHANNEL_GENERAL)
             if canal:
                 embed = discord.Embed(
-                    title="Seja bem-vindo(a)!",
-                    description=f"Seja bem-vindo(a), {member.mention}! \n\nSinta-se em casa — confira os canais e as regras.",
+                    title="👋 Seja bem-vindo(a) à Canella & Santos!",
+                    description=(
+                        f"Olá, {member.mention}! Seja bem-vindo(a) ao Discord oficial da **Canella & Santos**.\n\n"
+                        "Este espaço é utilizado para comunicação interna, alertas importantes e alinhamentos entre as equipes.\n\n"
+                        "📌 **Por onde começar:**\n"
+                        "• Confira os comunicados em **#comunicado-financeiro**\n"
+                        "• Acompanhe notificações em **#alerta-geral** e **#alertas-empresas**\n"
+                        "• Utilize os canais do seu time, como **#time-canella**\n\n"
+                        "📎 **Boas práticas:**\n"
+                        "• Utilize cada canal conforme o tema\n"
+                        "• Mantenha a comunicação clara e profissional\n"
+                        "• Evite mensagens fora do contexto de trabalho\n\n"
+                        "🆘 **Precisa de ajuda?**\n"
+                        "Entre em contato com seu líder ou utilize os canais apropriados.\n\n"
+                        "Desejamos uma excelente experiência e um ótimo trabalho!"
+                    ),
                     color=0x4CAF50,
                 )
-                embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
-                await canal.send(embed=embed)
+
+                # Adiciona o logo como thumbnail
+                logo_path = BOT_DIR / "logo_canella.jpg"
+                if logo_path.exists():
+                    file = discord.File(str(logo_path), filename="logo_canella.jpg")
+                    embed.set_thumbnail(url="attachment://logo_canella.jpg")
+                    embed.set_footer(text="Canella & Santos • Comunicação Interna")
+                    await canal.send(file=file, embed=embed)
+                else:
+                    embed.set_footer(text="Canella & Santos • Comunicação Interna")
+                    await canal.send(embed=embed)
+                    logger.warning("Logo não encontrado, enviando embed sem imagem")
+
                 logger.info(f"Mensagem de boas-vindas enviada para {member} (ID: {member.id})")
             else:
                 logger.warning("Canal de boas-vindas (DISCORD_CHANNEL_ID) não encontrado.")
@@ -258,41 +294,47 @@ class MyBot(discord.Client):
         logger.info("Monitorando planilha do Google Sheets...")
         print(f"ID da planilha: {GOOGLE_SHEET_ID}")
         logger.info(f"ID da planilha: {GOOGLE_SHEET_ID}")
-        print("Horários de verificação: 09:00, 11:00, 13:00, 15:00")
-        logger.info("Horários de verificação: 09:00, 11:00, 13:00, 15:00")
+        print("Modo: Verificação contínua a cada 2.5 minutos (TESTE)")
+        logger.info("Modo: Verificação contínua a cada 2.5 minutos (TESTE)")
 
         # Carrega dados salvos, se existirem
         self.sheet_data = self.carregar_estado()
 
-        # Horários de verificação
-        HORARIOS_VERIFICACAO = [9, 11, 13, 15]
-        ultima_hora_verificada = None
+        # === HORÁRIOS ESPECÍFICOS (COMENTADO PARA TESTES) ===
+        # Descomente o bloco abaixo para ativar verificações apenas nos horários: 09:00, 11:00, 13:00, 15:00
+        # HORARIOS_VERIFICACAO = [9, 11, 13, 15]
+        # ultima_hora_verificada = None
 
         while True:
             try:
                 agora = datetime.now()
-                hora_atual = agora.hour
+                # hora_atual = agora.hour
 
-                # Verifica se está em um horário de verificação e se ainda não verificou nesta hora
-                if hora_atual in HORARIOS_VERIFICACAO and ultima_hora_verificada != hora_atual:
-                    self.ultima_verificacao = agora.strftime('%d/%m/%Y %H:%M:%S')
-                    print(f"\n{'='*60}")
-                    print(f"Verificação agendada - {self.ultima_verificacao}")
-                    print(f"{'='*60}")
-                    logger.info(f"Verificação agendada - {self.ultima_verificacao}")
+                # === VERIFICAÇÃO POR HORÁRIOS ESPECÍFICOS (COMENTADO) ===
+                # Descomente este bloco e comente o bloco "VERIFICAÇÃO CONTÍNUA" abaixo para usar horários
+                # if hora_atual in HORARIOS_VERIFICACAO and ultima_hora_verificada != hora_atual:
+                #     self.ultima_verificacao = agora.strftime('%d/%m/%Y %H:%M:%S')
+                #     print(f"\n{'='*60}")
+                #     print(f"Verificação agendada - {self.ultima_verificacao}")
+                #     print(f"{'='*60}")
+                #     logger.info(f"Verificação agendada - {self.ultima_verificacao}")
 
-                    # Executa a chamada síncrona em thread separada para não bloquear o loop
-                    data = await asyncio.to_thread(self.sheet.get_all_values)
+                # === VERIFICAÇÃO CONTÍNUA (ATIVO PARA TESTES) ===
+                self.ultima_verificacao = agora.strftime('%d/%m/%Y %H:%M:%S')
+                print(f"\nVerificando planilha... {self.ultima_verificacao}")
+                logger.info(f"Verificando planilha... {self.ultima_verificacao}")
 
-                    print(f"Dados obtidos com sucesso! ({len(data)} linhas)")
-                    logger.info(f"Dados obtidos com sucesso! ({len(data)} linhas)")
-                    novos_dados = {}
-                    if len(data) <= 1:  # Verifica se há dados além do cabeçalho
-                        print("Planilha vazia ou contém apenas cabeçalho")
-                        logger.warning("Planilha vazia ou contém apenas cabeçalho")
-                        ultima_hora_verificada = hora_atual
-                        await asyncio.sleep(300)  # Aguarda 5 minutos antes de verificar novamente
-                        continue
+                # Executa a chamada síncrona em thread separada para não bloquear o loop
+                data = await asyncio.to_thread(self.sheet.get_all_values)
+
+                print(f"Dados obtidos com sucesso! ({len(data)} linhas)")
+                logger.info(f"Dados obtidos com sucesso! ({len(data)} linhas)")
+                novos_dados = {}
+                if len(data) <= 1:  # Verifica se há dados além do cabeçalho
+                    print("Planilha vazia ou contém apenas cabeçalho")
+                    logger.warning("Planilha vazia ou contém apenas cabeçalho")
+                    await asyncio.sleep(150)  # 2.5 minutos
+                    continue
 
                 # Pula a primeira linha (cabeçalho)
                 for idx, row in enumerate(data[1:], start=2):  # start=2 porque idx 1 é o cabeçalho
@@ -325,6 +367,17 @@ class MyBot(discord.Client):
                         logger.info(f"Status normalizado: '{status_bruto}' -> '{status}' ({codigo})")
                     if regime_tributario != regime_bruto:
                         logger.info(f"Regime normalizado: '{regime_bruto}' -> '{regime_tributario}' ({codigo})")
+
+                    # PROTEÇÃO: Se a empresa já existe e tinha regime, mas agora veio vazio da planilha
+                    # mantém o regime anterior (leitura temporária incompleta do Sheets)
+                    if codigo in self.sheet_data:
+                        dados_anterior = self.sheet_data[codigo]
+                        regime_anterior = dados_anterior.get("regime_tributario", "") if isinstance(dados_anterior, dict) else ""
+
+                        # Se tinha regime antes e agora veio vazio, mantém o anterior
+                        if regime_anterior and not regime_tributario:
+                            logger.warning(f"Regime vazio detectado temporariamente para {codigo} - {nome} (era {regime_anterior}). Mantendo regime anterior.")
+                            regime_tributario = regime_anterior
 
                     # Armazena em formato de dicionário (valores normalizados)
                     # Permite regime vazio para empresas novas sem regime ainda definido
@@ -367,18 +420,10 @@ class MyBot(discord.Client):
                                 logger.info(f"Status não requer notificação: {status}")
                         
                         # Verifica mudança de regime tributário
-                        # Só processa se houver mudança real (desconsiderando variações de vazio)
                         regime_anterior_valido = regime_anterior if regime_anterior else ""
                         regime_novo_valido = regime_tributario if regime_tributario else ""
 
                         if regime_novo_valido != regime_anterior_valido:
-                            # PROTEÇÃO: Ignora mudanças temporárias para/de vazio se regime anterior existia
-                            # Isso evita falsos positivos causados por leituras incompletas do Sheets
-                            if regime_anterior_valido and not regime_novo_valido:
-                                # Regime sumiu (provavelmente leitura temporária incompleta) - IGNORA
-                                logger.warning(f"Regime vazio detectado temporariamente: {codigo} - {nome} (era {regime_anterior_valido}). Ignorando...")
-                                continue
-
                             if regime_anterior_valido and regime_novo_valido:
                                 # Mudança de regime (já tinha um regime antes e tem um novo diferente)
                                 print(f"\nAlteração de Regime Tributário detectada na linha {idx}:")
@@ -396,11 +441,15 @@ class MyBot(discord.Client):
                                     valor_novo=regime_novo_valido
                                 )
 
+                                # NÃO notifica mudança de regime se o status atual for negativo
                                 if self.primeiro_carregamento_completo:
-                                    await self.enviar_mensagem_regime_tributario(codigo, nome, regime_anterior_valido, regime_novo_valido)
+                                    if eh_status_monitorado(status):
+                                        logger.info(f"   Mudança de regime com status negativo ({status}): registrando sem notificar Discord")
+                                        print(f"   Status negativo ({status}): não notificando mudança de regime")
+                                    else:
+                                        await self.enviar_mensagem_regime_tributario(codigo, nome, regime_anterior_valido, regime_novo_valido)
                             elif regime_novo_valido and not regime_anterior_valido:
                                 # Regime definido pela primeira vez (empresa já existia, mas sem regime)
-                                # Só notifica se passou do primeiro carregamento
                                 print(f"\nRegime tributário definido na linha {idx}:")
                                 print(f"   Empresa: {codigo} - {nome}")
                                 print(f"   Regime tributário: {regime_novo_valido}")
@@ -415,45 +464,62 @@ class MyBot(discord.Client):
                                     valor_novo=regime_novo_valido
                                 )
 
+                                # NÃO notifica definição de regime se o status atual for negativo
                                 if self.primeiro_carregamento_completo:
-                                    await self.enviar_mensagem_regime_definido(codigo, nome, regime_novo_valido)
+                                    if eh_status_monitorado(status):
+                                        logger.info(f"   Regime definido com status negativo ({status}): registrando sem notificar Discord")
+                                        print(f"   Status negativo ({status}): não notificando definição de regime")
+                                    else:
+                                        await self.enviar_mensagem_regime_definido(codigo, nome, regime_novo_valido)
                     else:
-                        # Nova empresa detectada - notifica imediatamente
+                        # Nova empresa detectada
                         print(f"\nNova empresa detectada na linha {idx}:")
                         print(f"   Empresa: {codigo} - {nome}")
                         print(f"   Status inicial: {status}")
                         print(f"   Regime tributário: {regime_tributario if regime_tributario else 'Não definido'}")
                         logger.info(f"Nova empresa detectada na linha {idx}: {codigo} - {nome} (Status: {status}, Regime: {regime_tributario if regime_tributario else 'Não definido'})")
 
-                        # Só envia notificação se não for o primeiro carregamento
+                        # Só envia notificação se não for o primeiro carregamento E se o status NÃO for negativo
                         if self.primeiro_carregamento_completo:
-                            await self.enviar_mensagem_nova_empresa(codigo, nome, status, regime_tributario)
+                            # NÃO notifica empresas novas com status negativo
+                            # Empresas já criadas inativas/baixas/devolvidas/suspensas não precisam de notificação
+                            if eh_status_monitorado(status):
+                                logger.info(f"   Nova empresa com status negativo ({status}): registrando sem notificar Discord")
+                                print(f"   Nova empresa com status negativo ({status}): apenas registrando")
+                            else:
+                                # Notifica apenas empresas novas com status ATIVA
+                                await self.enviar_mensagem_nova_empresa(codigo, nome, status, regime_tributario)
                         else:
                             logger.info(f"   Primeira carga: anotando {codigo} sem notificar Discord")
 
-                    # Atualiza dados salvos
-                    self.sheet_data = novos_dados
-                    await self.salvar_estado(novos_dados)
+                # FIM DO LOOP - Atualiza dados salvos APÓS processar TODAS as linhas
+                self.sheet_data = novos_dados
+                await self.salvar_estado(novos_dados)
 
-                    # Se for a primeira carga, marca como completa APÓS salvar tudo
-                    if not self.primeiro_carregamento_completo:
-                        marcar_primeiro_carregamento()
-                        self.primeiro_carregamento_completo = True
+                # Se for a primeira carga, marca como completa APÓS salvar tudo
+                if not self.primeiro_carregamento_completo:
+                    marcar_primeiro_carregamento()
+                    self.primeiro_carregamento_completo = True
 
-                    # Marca esta hora como verificada
-                    ultima_hora_verificada = hora_atual
-                    print(f"{'='*60}")
-                    print(f"Verificação concluída às {agora.strftime('%H:%M:%S')}")
-                    print(f"Próxima verificação: {self._proxima_verificacao(hora_atual)}")
-                    print(f"{'='*60}\n")
-                    logger.info(f"Verificação concluída. Próxima: {self._proxima_verificacao(hora_atual)}")
+                # === PARA HORÁRIOS ESPECÍFICOS (COMENTADO) ===
+                # Descomente as linhas abaixo ao usar horários específicos
+                # ultima_hora_verificada = hora_atual
+                # print(f"{'='*60}")
+                # print(f"Verificação concluída às {agora.strftime('%H:%M:%S')}")
+                # print(f"Próxima verificação: {self._proxima_verificacao(hora_atual)}")
+                # print(f"{'='*60}\n")
+                # logger.info(f"Verificação concluída. Próxima: {self._proxima_verificacao(hora_atual)}")
 
             except Exception as e:
                 print(f"Erro ao monitorar planilha: {e}")
                 logger.error(f"Erro ao monitorar planilha: {e}")
 
-            # Verifica a cada 5 minutos se está na hora de executar
-            await asyncio.sleep(300)
+            # === MODO TESTE: Verifica a cada 2.5 minutos ===
+            await asyncio.sleep(150)
+
+            # === PARA HORÁRIOS ESPECÍFICOS (COMENTADO) ===
+            # Descomente a linha abaixo e comente o asyncio.sleep(150) acima para usar horários
+            # await asyncio.sleep(300)  # Verifica a cada 5 minutos se está na hora de executar
 
 
     # === Funções auxiliares ===
@@ -633,7 +699,7 @@ class MyBot(discord.Client):
                 description=f"Nenhuma alteração registrada nesta competência.",
                 color=0x9E9E9E
             )
-            embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
+            embed.set_footer(text="Canella & Santos • Comunicação Interna")
             await canal.send("@everyone", embed=embed)
             return
 
@@ -697,14 +763,514 @@ class MyBot(discord.Client):
                 inline=False
             )
 
-        embed.set_footer(text=f"CANELLA & SANTOS CONTABILIDADE EIRELI * Competência: {competencia}")
+        embed.set_footer(text=f"Canella & Santos • Competência: {competencia}")
 
         await canal.send("@everyone", embed=embed)
         logger.info(f"Relatório mensal enviado: {competencia}")
 
-        # Se houver muitas alterações, cria um arquivo detalhado
-        if stats['total_alteracoes'] > 20:
-            await self.enviar_relatorio_detalhado(canal, competencia, alteracoes, empresas_alteradas)
+        # Sempre gera e envia o PDF detalhado
+        await self.enviar_relatorio_detalhado(canal, competencia, alteracoes, empresas_alteradas)
+
+    async def enviar_relatorio_anual(self, canal, ano, competencias_ano):
+        """Envia o relatório anual consolidado de alterações."""
+
+        if not canal:
+            logger.error("Canal do Discord não encontrado para envio do relatório anual")
+            print("ERRO: Canal do Discord não encontrado")
+            return
+
+        # Consolida dados de todas as competências do ano
+        total_alteracoes = 0
+        total_alteracoes_status = 0
+        total_alteracoes_regime = 0
+        todas_alteracoes = []
+        empresas_alteradas_ano = {}
+
+        for competencia in sorted(competencias_ano):
+            dados = self.historico_alteracoes[competencia]
+            stats = dados["estatisticas"]
+            alteracoes = dados["alteracoes"]
+
+            total_alteracoes += stats["total_alteracoes"]
+            total_alteracoes_status += stats["alteracoes_status"]
+            total_alteracoes_regime += stats["alteracoes_regime"]
+            todas_alteracoes.extend(alteracoes)
+
+            # Agrupa empresas
+            for alt in alteracoes:
+                codigo = alt["codigo"]
+                if codigo not in empresas_alteradas_ano:
+                    empresas_alteradas_ano[codigo] = {
+                        "nome": alt["nome"],
+                        "alteracoes": []
+                    }
+                empresas_alteradas_ano[codigo]["alteracoes"].append(alt)
+
+        # Cria o embed principal
+        embed = discord.Embed(
+            title=f"📊 Relatório Anual - {ano}",
+            description=f"Resumo consolidado de todas as alterações do ano",
+            color=0x2196F3
+        )
+
+        # Estatísticas gerais
+        embed.add_field(
+            name="Estatísticas Gerais",
+            value=f"**Total de Alterações:** {total_alteracoes}\n"
+                  f"**Alterações de Status:** {total_alteracoes_status}\n"
+                  f"**Alterações de Regime:** {total_alteracoes_regime}\n"
+                  f"**Empresas Afetadas:** {len(empresas_alteradas_ano)}\n"
+                  f"**Meses com Alterações:** {len(competencias_ano)}",
+            inline=False
+        )
+
+        # Resumo por mês
+        resumo_meses = []
+        mes_nome_pt = {
+            "JANUARY": "JAN", "FEBRUARY": "FEV", "MARCH": "MAR",
+            "APRIL": "ABR", "MAY": "MAI", "JUNE": "JUN",
+            "JULY": "JUL", "AUGUST": "AGO", "SEPTEMBER": "SET",
+            "OCTOBER": "OUT", "NOVEMBER": "NOV", "DECEMBER": "DEZ"
+        }
+
+        for competencia in sorted(competencias_ano):
+            dados = self.historico_alteracoes[competencia]
+            stats = dados["estatisticas"]
+            data_comp = datetime.strptime(competencia, "%Y-%m")
+            mes_nome = data_comp.strftime("%B").upper()
+            mes_abrev = mes_nome_pt.get(mes_nome, mes_nome[:3])
+
+            resumo_meses.append(f"**{mes_abrev}:** {stats['total_alteracoes']} alterações")
+
+        if resumo_meses:
+            # Divide em colunas se houver muitos meses
+            if len(resumo_meses) > 6:
+                metade = len(resumo_meses) // 2
+                embed.add_field(
+                    name="Resumo por Mês (1º Semestre)",
+                    value="\n".join(resumo_meses[:metade]),
+                    inline=True
+                )
+                embed.add_field(
+                    name="Resumo por Mês (2º Semestre)",
+                    value="\n".join(resumo_meses[metade:]),
+                    inline=True
+                )
+            else:
+                embed.add_field(
+                    name="Resumo por Mês",
+                    value="\n".join(resumo_meses),
+                    inline=False
+                )
+
+        # Top 10 empresas com mais alterações
+        empresas_ordenadas = sorted(
+            empresas_alteradas_ano.items(),
+            key=lambda x: len(x[1]["alteracoes"]),
+            reverse=True
+        )
+
+        top_empresas = []
+        for i, (codigo, dados_emp) in enumerate(empresas_ordenadas[:10]):
+            num_alt = len(dados_emp["alteracoes"])
+            top_empresas.append(f"{i+1}. **{codigo}** - {dados_emp['nome'][:30]}... ({num_alt}x)")
+
+        if top_empresas:
+            embed.add_field(
+                name="Top 10 Empresas com Mais Alterações",
+                value="\n".join(top_empresas),
+                inline=False
+            )
+
+        embed.set_footer(text=f"Canella & Santos • Ano: {ano}")
+
+        await canal.send("@everyone", embed=embed)
+        logger.info(f"Relatório anual enviado: {ano}")
+
+        # Sempre gera e envia o PDF detalhado anual
+        await self.enviar_relatorio_anual_detalhado(canal, ano, todas_alteracoes, empresas_alteradas_ano, competencias_ano)
+
+    async def enviar_relatorio_detalhado(self, canal, competencia, alteracoes, empresas_alteradas):
+        """Gera e envia relatório detalhado em PDF com todas as alterações."""
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+
+            # Formata a competência para exibição
+            data_comp = datetime.strptime(competencia, "%Y-%m")
+            mes_nome = data_comp.strftime("%B/%Y").upper()
+            mes_nome_pt = {
+                "JANUARY": "JANEIRO", "FEBRUARY": "FEVEREIRO", "MARCH": "MARÇO",
+                "APRIL": "ABRIL", "MAY": "MAIO", "JUNE": "JUNHO",
+                "JULY": "JULHO", "AUGUST": "AGOSTO", "SEPTEMBER": "SETEMBRO",
+                "OCTOBER": "OUTUBRO", "NOVEMBER": "NOVEMBRO", "DECEMBER": "DEZEMBRO"
+            }
+            for en, pt in mes_nome_pt.items():
+                mes_nome = mes_nome.replace(en, pt)
+
+            # Cria o arquivo PDF
+            pdf_filename = DATA_DIR / f"relatorio_detalhado_{competencia}.pdf"
+            doc = SimpleDocTemplate(str(pdf_filename), pagesize=A4)
+            elements = []
+
+            # Estilos
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=16,
+                textColor=colors.HexColor('#2196F3'),
+                spaceAfter=30,
+                alignment=1  # Center
+            )
+
+            heading_style = ParagraphStyle(
+                'CustomHeading',
+                parent=styles['Heading2'],
+                fontSize=12,
+                textColor=colors.HexColor('#1976D2'),
+                spaceAfter=12,
+            )
+
+            # Título
+            elements.append(Paragraph(f"RELATÓRIO DETALHADO DE ALTERAÇÕES", title_style))
+            elements.append(Paragraph(f"Competência: {mes_nome}", styles['Normal']))
+            elements.append(Paragraph(f"CANELLA & SANTOS CONTABILIDADE EIRELI", styles['Normal']))
+            elements.append(Spacer(1, 0.5*cm))
+
+            # Estatísticas gerais
+            elements.append(Paragraph("ESTATÍSTICAS GERAIS", heading_style))
+            stats_data = [
+                ['Total de Alterações', str(len(alteracoes))],
+                ['Empresas Afetadas', str(len(empresas_alteradas))],
+                ['Alterações de Status', str(sum(1 for a in alteracoes if a['tipo'] == 'status'))],
+                ['Alterações de Regime', str(sum(1 for a in alteracoes if a['tipo'] == 'regime_tributario'))],
+            ]
+            stats_table = Table(stats_data, colWidths=[12*cm, 5*cm])
+            stats_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#E3F2FD')),
+                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+                ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#2196F3'))
+            ]))
+            elements.append(stats_table)
+            elements.append(Spacer(1, 0.5*cm))
+
+            # Detalhamento por empresa
+            elements.append(Paragraph("DETALHAMENTO POR EMPRESA", heading_style))
+            elements.append(Spacer(1, 0.3*cm))
+
+            for codigo, dados_emp in sorted(empresas_alteradas.items()):
+                # Nome da empresa
+                elements.append(Paragraph(f"<b>{codigo}</b> - {dados_emp['nome']}", styles['Normal']))
+
+                # Tabela de alterações dessa empresa
+                alteracoes_emp = dados_emp['alteracoes']
+                data = [['Tipo', 'De', 'Para', 'Data/Hora']]
+
+                for alt in alteracoes_emp:
+                    tipo_display = 'Status' if alt['tipo'] == 'status' else 'Regime'
+                    data.append([
+                        tipo_display,
+                        str(alt['valor_anterior'])[:30],
+                        str(alt['valor_novo'])[:30],
+                        alt['data_hora']
+                    ])
+
+                table = Table(data, colWidths=[3*cm, 4*cm, 4*cm, 4.5*cm])
+                table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2196F3')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 9),
+                    ('FONTSIZE', (0, 1), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+                elements.append(table)
+                elements.append(Spacer(1, 0.4*cm))
+
+            # Gera o PDF
+            def _gerar_pdf():
+                doc.build(elements)
+
+            await asyncio.to_thread(_gerar_pdf)
+
+            # Envia o arquivo
+            await canal.send(
+                "📄 Relatório detalhado em PDF:",
+                file=discord.File(str(pdf_filename))
+            )
+
+            logger.info(f"Relatório detalhado em PDF enviado: {competencia}")
+            print(f"Relatório detalhado em PDF enviado: {pdf_filename}")
+
+        except ImportError:
+            # Se reportlab não estiver instalado, gera arquivo TXT como fallback
+            logger.warning("ReportLab não instalado. Gerando relatório em TXT.")
+            await self.enviar_relatorio_detalhado_txt(canal, competencia, alteracoes, empresas_alteradas)
+        except Exception as e:
+            logger.error(f"Erro ao gerar relatório detalhado em PDF: {e}")
+            print(f"Erro ao gerar relatório detalhado: {e}")
+            # Tenta enviar em TXT como fallback
+            try:
+                await self.enviar_relatorio_detalhado_txt(canal, competencia, alteracoes, empresas_alteradas)
+            except Exception as e2:
+                logger.error(f"Erro ao gerar relatório TXT de fallback: {e2}")
+
+    async def enviar_relatorio_detalhado_txt(self, canal, competencia, alteracoes, empresas_alteradas):
+        """Gera e envia relatório detalhado em TXT (fallback quando PDF não disponível)."""
+        try:
+            # Formata a competência para exibição
+            data_comp = datetime.strptime(competencia, "%Y-%m")
+            mes_nome = data_comp.strftime("%B/%Y").upper()
+            mes_nome_pt = {
+                "JANUARY": "JANEIRO", "FEBRUARY": "FEVEREIRO", "MARCH": "MARÇO",
+                "APRIL": "ABRIL", "MAY": "MAIO", "JUNE": "JUNHO",
+                "JULY": "JULHO", "AUGUST": "AGOSTO", "SEPTEMBER": "SETEMBRO",
+                "OCTOBER": "OUTUBRO", "NOVEMBER": "NOVEMBRO", "DECEMBER": "DEZEMBRO"
+            }
+            for en, pt in mes_nome_pt.items():
+                mes_nome = mes_nome.replace(en, pt)
+
+            # Cria o conteúdo do arquivo TXT
+            txt_filename = DATA_DIR / f"relatorio_detalhado_{competencia}.txt"
+
+            def _gerar_txt():
+                with open(txt_filename, 'w', encoding='utf-8') as f:
+                    f.write("="*80 + "\n")
+                    f.write("RELATÓRIO DETALHADO DE ALTERAÇÕES\n")
+                    f.write(f"Competência: {mes_nome}\n")
+                    f.write("CANELLA & SANTOS CONTABILIDADE EIRELI\n")
+                    f.write("="*80 + "\n\n")
+
+                    # Estatísticas
+                    f.write("ESTATÍSTICAS GERAIS\n")
+                    f.write("-"*80 + "\n")
+                    f.write(f"Total de Alterações: {len(alteracoes)}\n")
+                    f.write(f"Empresas Afetadas: {len(empresas_alteradas)}\n")
+                    f.write(f"Alterações de Status: {sum(1 for a in alteracoes if a['tipo'] == 'status')}\n")
+                    f.write(f"Alterações de Regime: {sum(1 for a in alteracoes if a['tipo'] == 'regime_tributario')}\n")
+                    f.write("\n" + "="*80 + "\n\n")
+
+                    # Detalhamento por empresa
+                    f.write("DETALHAMENTO POR EMPRESA\n")
+                    f.write("="*80 + "\n\n")
+
+                    for codigo, dados_emp in sorted(empresas_alteradas.items()):
+                        f.write(f"Empresa: {codigo} - {dados_emp['nome']}\n")
+                        f.write("-"*80 + "\n")
+
+                        for alt in dados_emp['alteracoes']:
+                            tipo_display = 'Status' if alt['tipo'] == 'status' else 'Regime Tributário'
+                            f.write(f"  • Tipo: {tipo_display}\n")
+                            f.write(f"    De: {alt['valor_anterior']}\n")
+                            f.write(f"    Para: {alt['valor_novo']}\n")
+                            f.write(f"    Data/Hora: {alt['data_hora']}\n")
+                            f.write("\n")
+
+                        f.write("\n")
+
+                    f.write("="*80 + "\n")
+                    f.write(f"Relatório gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n")
+
+            await asyncio.to_thread(_gerar_txt)
+
+            # Envia o arquivo
+            await canal.send(
+                "📄 Relatório detalhado em TXT:",
+                file=discord.File(str(txt_filename))
+            )
+
+            logger.info(f"Relatório detalhado em TXT enviado: {competencia}")
+            print(f"Relatório detalhado em TXT enviado: {txt_filename}")
+
+        except Exception as e:
+            logger.error(f"Erro ao gerar relatório detalhado em TXT: {e}")
+            print(f"Erro ao gerar relatório detalhado TXT: {e}")
+
+    async def enviar_relatorio_anual_detalhado(self, canal, ano, alteracoes, empresas_alteradas, competencias):
+        """Gera e envia relatório anual detalhado em PDF com todas as alterações do ano."""
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+
+            # Cria o arquivo PDF
+            pdf_filename = DATA_DIR / f"relatorio_anual_{ano}.pdf"
+            doc = SimpleDocTemplate(str(pdf_filename), pagesize=A4)
+            elements = []
+
+            # Estilos
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=18,
+                textColor=colors.HexColor('#2196F3'),
+                spaceAfter=30,
+                alignment=1  # Center
+            )
+
+            heading_style = ParagraphStyle(
+                'CustomHeading',
+                parent=styles['Heading2'],
+                fontSize=14,
+                textColor=colors.HexColor('#1976D2'),
+                spaceAfter=12,
+            )
+
+            subheading_style = ParagraphStyle(
+                'CustomSubHeading',
+                parent=styles['Heading3'],
+                fontSize=11,
+                textColor=colors.HexColor('#0D47A1'),
+                spaceAfter=8,
+            )
+
+            # Título
+            elements.append(Paragraph(f"RELATÓRIO ANUAL DE ALTERAÇÕES - {ano}", title_style))
+            elements.append(Paragraph(f"CANELLA & SANTOS CONTABILIDADE EIRELI", styles['Normal']))
+            elements.append(Spacer(1, 0.5*cm))
+
+            # Estatísticas gerais
+            elements.append(Paragraph("ESTATÍSTICAS GERAIS", heading_style))
+            stats_data = [
+                ['Total de Alterações', str(len(alteracoes))],
+                ['Empresas Afetadas', str(len(empresas_alteradas))],
+                ['Alterações de Status', str(sum(1 for a in alteracoes if a['tipo'] == 'status'))],
+                ['Alterações de Regime', str(sum(1 for a in alteracoes if a['tipo'] == 'regime_tributario'))],
+                ['Meses com Alterações', str(len(competencias))],
+            ]
+            stats_table = Table(stats_data, colWidths=[13*cm, 4*cm])
+            stats_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#E3F2FD')),
+                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+                ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#2196F3'))
+            ]))
+            elements.append(stats_table)
+            elements.append(Spacer(1, 0.5*cm))
+
+            # Resumo por mês
+            elements.append(Paragraph("RESUMO POR MÊS", heading_style))
+            mes_nome_pt = {
+                "JANUARY": "JANEIRO", "FEBRUARY": "FEVEREIRO", "MARCH": "MARÇO",
+                "APRIL": "ABRIL", "MAY": "MAIO", "JUNE": "JUNHO",
+                "JULY": "JULHO", "AUGUST": "AGOSTO", "SEPTEMBER": "SETEMBRO",
+                "OCTOBER": "OUTUBRO", "NOVEMBER": "NOVEMBRO", "DECEMBER": "DEZEMBRO"
+            }
+
+            resumo_data = [['Mês', 'Alterações', 'Status', 'Regime']]
+            for competencia in sorted(competencias):
+                dados = self.historico_alteracoes[competencia]
+                stats = dados["estatisticas"]
+                data_comp = datetime.strptime(competencia, "%Y-%m")
+                mes_nome = data_comp.strftime("%B/%Y").upper()
+                for en, pt in mes_nome_pt.items():
+                    mes_nome = mes_nome.replace(en, pt)
+
+                resumo_data.append([
+                    mes_nome,
+                    str(stats['total_alteracoes']),
+                    str(stats['alteracoes_status']),
+                    str(stats['alteracoes_regime'])
+                ])
+
+            resumo_table = Table(resumo_data, colWidths=[7*cm, 3.5*cm, 3.5*cm, 3*cm])
+            resumo_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2196F3')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 10),
+                ('FONTSIZE', (0, 1), (-1, -1), 9),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.beige, colors.lightgrey])
+            ]))
+            elements.append(resumo_table)
+            elements.append(Spacer(1, 0.7*cm))
+
+            # Detalhamento por empresa
+            elements.append(Paragraph("DETALHAMENTO POR EMPRESA", heading_style))
+            elements.append(Spacer(1, 0.3*cm))
+
+            for codigo, dados_emp in sorted(empresas_alteradas.items()):
+                # Nome da empresa
+                elements.append(Paragraph(f"<b>{codigo}</b> - {dados_emp['nome']}", subheading_style))
+
+                # Tabela de alterações dessa empresa
+                alteracoes_emp = dados_emp['alteracoes']
+                data = [['Tipo', 'De', 'Para', 'Data/Hora']]
+
+                for alt in alteracoes_emp:
+                    tipo_display = 'Status' if alt['tipo'] == 'status' else 'Regime'
+                    data.append([
+                        tipo_display,
+                        str(alt['valor_anterior'])[:25],
+                        str(alt['valor_novo'])[:25],
+                        alt['data_hora']
+                    ])
+
+                table = Table(data, colWidths=[2.5*cm, 4.5*cm, 4.5*cm, 4.5*cm])
+                table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2196F3')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 9),
+                    ('FONTSIZE', (0, 1), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+                elements.append(table)
+                elements.append(Spacer(1, 0.4*cm))
+
+            # Rodapé
+            elements.append(Spacer(1, 1*cm))
+            elements.append(Paragraph(
+                f"Relatório gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+                styles['Normal']
+            ))
+
+            # Gera o PDF
+            def _gerar_pdf():
+                doc.build(elements)
+
+            await asyncio.to_thread(_gerar_pdf)
+
+            # Envia o arquivo
+            await canal.send(
+                f"📄 Relatório anual detalhado em PDF - {ano}:",
+                file=discord.File(str(pdf_filename))
+            )
+
+            logger.info(f"Relatório anual detalhado em PDF enviado: {ano}")
+            print(f"Relatório anual detalhado em PDF enviado: {pdf_filename}")
+
+        except ImportError:
+            logger.warning("ReportLab não instalado. Não foi possível gerar PDF anual.")
+            await canal.send("⚠️ Erro: ReportLab não instalado. Instale com: `pip install reportlab`")
+        except Exception as e:
+            logger.error(f"Erro ao gerar relatório anual detalhado em PDF: {e}")
+            print(f"Erro ao gerar relatório anual detalhado: {e}")
+            await canal.send(f"⚠️ Erro ao gerar relatório anual em PDF: {str(e)}")
 
     async def enviar_mensagem(self, codigo, nome, status):
         canal = self.get_channel(DISCORD_CHANNEL_ID)
@@ -725,8 +1291,8 @@ class MyBot(discord.Client):
         embed.add_field(name="Novo Status", value=f"**{status}**", inline=False)
         embed.add_field(name="Data/Hora", value=self.ultima_verificacao, inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)  # Campo vazio para padronizar
-        embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
-        
+        embed.set_footer(text="Canella & Santos • Comunicação Interna")
+
         await canal.send("@everyone", embed=embed)
         logger.info(f"Mensagem enviada: {codigo} - {nome} -> {status}")
         print(f"Mensagem enviada: {codigo} - {nome} -> {status}")
@@ -744,7 +1310,7 @@ class MyBot(discord.Client):
         embed.add_field(name="Regime Tributário", value=f"**{regime_tributario if regime_tributario else '—'}**", inline=True)
         embed.add_field(name="Data/Hora", value=self.ultima_verificacao, inline=False)
         embed.add_field(name="\u200b", value="\u200b", inline=True)  # Campo vazio para padronizar
-        embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
+        embed.set_footer(text="Canella & Santos • Comunicação Interna")
 
         await canal.send("@everyone", embed=embed)
         logger.info(f"Mensagem de nova empresa enviada: {codigo} - {nome}")
@@ -786,7 +1352,7 @@ class MyBot(discord.Client):
             inline=False
         )
         embed.add_field(name="\u200b", value="\u200b", inline=True)  # Campo vazio para padronizar
-        embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
+        embed.set_footer(text="Canella & Santos • Comunicação Interna")
 
         await canal.send("@everyone", embed=embed)
         logger.info(f"Mensagem de reativação enviada: {codigo} - {nome} ({status_anterior} -> ATIVA)")
@@ -834,8 +1400,8 @@ class MyBot(discord.Client):
             inline=False
         )
         embed.add_field(name="\u200b", value="\u200b", inline=True)  # Campo vazio para padronizar
-        embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
-        
+        embed.set_footer(text="Canella & Santos • Comunicação Interna")
+
         await canal.send("@everyone", embed=embed)
         logger.info(f"Notificação de regime tributário enviada: {codigo} - {nome} ({regime_anterior} -> {regime_novo})")
         print(f"Notificação de regime tributário: {codigo} - {nome} ({regime_anterior} -> {regime_novo})")
@@ -871,7 +1437,7 @@ class MyBot(discord.Client):
         )
         embed.add_field(name="Data/Hora", value=self.ultima_verificacao, inline=False)
         embed.add_field(name="\u200b", value="\u200b", inline=True)
-        embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
+        embed.set_footer(text="Canella & Santos • Comunicação Interna")
 
         await canal.send("@everyone", embed=embed)
         logger.info(f"Notificação de regime definido enviada: {codigo} - {nome} (Regime: {regime_tributario})")
@@ -918,6 +1484,16 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="/relatorio-anual [ano]",
+        value="Gera relatório anual consolidado de alterações\n"
+              "* Sem parâmetros: ano atual\n"
+              "* Com parâmetro: ano específico\n"
+              "* Inclui PDF detalhado com todas as alterações do ano\n"
+              "Exemplo: `/relatorio-anual 2024`",
+        inline=False
+    )
+
+    embed.add_field(
         name="Notificações Automáticas",
         value="* Quando empresa fica INATIVA/BAIXA/DEVOLVIDA/SUSPENSA\n"
               "* Quando empresa volta a ficar ATIVA\n"
@@ -926,7 +1502,7 @@ async def help_command(interaction: discord.Interaction):
         inline=False
     )
 
-    embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
+    embed.set_footer(text="Canella & Santos • Comunicação Interna")
 
     await interaction.response.send_message(embed=embed)
     logger.info(f"Comando /help executado por {interaction.user}")
@@ -961,7 +1537,7 @@ async def status(interaction: discord.Interaction):
         value="**Online**",
         inline=True
     )
-    embed.set_footer(text="CANELLA & SANTOS CONTABILIDADE EIRELI")
+    embed.set_footer(text="Canella & Santos • Comunicação Interna")
 
     await interaction.response.send_message(embed=embed)
     logger.info(f"Comando /status executado por {interaction.user}")
@@ -1049,10 +1625,54 @@ async def historico(interaction: discord.Interaction):
             inline=True
         )
 
-    embed.set_footer(text=f"Use /relatorio para gerar o relatório de um mês específico")
+    embed.set_footer(text=f"Canella & Santos • Use /relatorio para relatórios mensais")
 
     await interaction.response.send_message(embed=embed)
     logger.info(f"Comando /historico executado por {interaction.user}")
+
+@bot.tree.command(name="relatorio-anual", description="Gera relatório anual consolidado de alterações")
+@app_commands.describe(
+    ano="Ano (ex: 2024). Deixe vazio para o ano atual."
+)
+async def relatorio_anual(interaction: discord.Interaction, ano: int = None):
+    """
+    Gera relatório anual consolidado de alterações.
+
+    Args:
+        ano: Ano (ex: 2025). Se não informado, usa o ano atual.
+    """
+    await interaction.response.defer()  # Indica que o bot está processando
+
+    try:
+        # Define o ano
+        if ano is None:
+            agora = datetime.now()
+            ano = agora.year
+
+        # Filtra as competências do ano solicitado
+        competencias_ano = [
+            comp for comp in bot.historico_alteracoes.keys()
+            if comp.startswith(f"{ano}-")
+        ]
+
+        if not competencias_ano:
+            await interaction.followup.send(
+                f"Nenhuma alteração registrada para o ano {ano}."
+            )
+            logger.info(f"Comando /relatorio-anual executado por {interaction.user} - Sem dados para {ano}")
+            return
+
+        # Envia o relatório anual
+        await bot.enviar_relatorio_anual(interaction.channel, ano, competencias_ano)
+
+        await interaction.followup.send(
+            f"Relatório anual de {ano} enviado com sucesso!"
+        )
+        logger.info(f"Comando /relatorio-anual executado por {interaction.user} - Ano: {ano}")
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao gerar relatório anual: {str(e)}")
+        logger.error(f"Erro no comando /relatorio-anual: {e}")
 
 # === INICIALIZAÇÃO DO BOT ===
 if __name__ == "__main__":
