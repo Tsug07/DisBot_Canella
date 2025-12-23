@@ -41,7 +41,9 @@ logger = logging.getLogger(__name__)
 
 # === CONFIGURAÇÕES ===
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-DISCORD_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID')) if os.getenv('DISCORD_CHANNEL_ID') else 0  # Canal específico para alterações
+DISCORD_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID')) if os.getenv('DISCORD_CHANNEL_ID') else 0
+# Canal específico para alterações
+DISCORD_SUSPENSE_CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_SUSPENSE_ID')) if os.getenv('DISCORD_CHANNEL_SUSPENSE_ID') else 0
 # Canal geral para boas-vindas e notificações gerais. Se não configurado, usa DISCORD_CHANNEL_ID
 DISCORD_CHANNEL_GENERAL = int(os.getenv('DISCORD_CHANNEL_GENERAL')) if os.getenv('DISCORD_CHANNEL_GENERAL') else DISCORD_CHANNEL_ID
 GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
@@ -218,7 +220,9 @@ class MyBot(discord.Client):
         self.sheet_data = {}
         self.ultima_verificacao = None
         self.historico_alteracoes = {}  # Histórico de alterações por mês
+        self.historico_suspensas = {}  # Histórico de empresas suspensas por semana
         self.ultimo_relatorio_enviado = None  # Data do último relatório enviado
+        self.ultimo_relatorio_suspensas_enviado = None  # Data do último relatório semanal de suspensas
         self.primeiro_carregamento_completo = verificar_primeiro_carregamento()  # Flag de primeiro carregamento
 
     async def setup_hook(self):
@@ -241,9 +245,13 @@ class MyBot(discord.Client):
         # Carrega histórico de alterações
         self.historico_alteracoes = self.carregar_historico()
 
+        # Carrega histórico de suspensas
+        self.historico_suspensas = self.carregar_historico_suspensas()
+
         # Inicia tarefas em paralelo
         self.loop.create_task(self.monitorar_planilha())
         self.loop.create_task(self.verificar_relatorio_mensal())
+        self.loop.create_task(self.verificar_relatorio_semanal_suspensas())
 
     async def on_member_join(self, member):
         """Envia mensagem de boas-vindas quando um novo membro entra no servidor."""
@@ -289,6 +297,27 @@ class MyBot(discord.Client):
         except Exception as e:
             logger.error(f"Erro ao enviar mensagem de boas-vindas: {e}")
 
+    async def reconectar_sheets(self):
+        """Reconecta ao Google Sheets em caso de erro de conexão."""
+        try:
+            logger.info("Tentando reconectar ao Google Sheets...")
+            print("Reconectando ao Google Sheets...")
+
+            def init_sheets():
+                gc = gspread.authorize(
+                    Credentials.from_service_account_file(PATH_CREDENTIALS, scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"])
+                )
+                return gc.open_by_key(GOOGLE_SHEET_ID).sheet1
+
+            self.sheet = await asyncio.to_thread(init_sheets)
+            logger.info("Reconexão ao Google Sheets bem-sucedida!")
+            print("Reconexão bem-sucedida!")
+            return True
+        except Exception as e:
+            logger.error(f"Erro ao reconectar ao Google Sheets: {e}")
+            print(f"Erro ao reconectar: {e}")
+            return False
+
     async def monitorar_planilha(self):
         print("Monitorando planilha do Google Sheets...")
         logger.info("Monitorando planilha do Google Sheets...")
@@ -299,6 +328,10 @@ class MyBot(discord.Client):
 
         # Carrega dados salvos, se existirem
         self.sheet_data = self.carregar_estado()
+
+        # Contador de tentativas de reconexão
+        tentativas_reconexao = 0
+        MAX_TENTATIVAS_RECONEXAO = 3
 
         # === HORÁRIOS ESPECÍFICOS (COMENTADO PARA TESTES) ===
         # Descomente o bloco abaixo para ativar verificações apenas nos horários: 09:00, 11:00, 13:00, 15:00
@@ -412,6 +445,9 @@ class MyBot(discord.Client):
                             # Notifica sobre status monitorado (problema)
                             if eh_status_monitorado(status):
                                 await self.enviar_mensagem(codigo, nome, status)
+                                # Registra empresa suspensa para relatório semanal
+                                if status == "SUSPENSA":
+                                    self.registrar_empresa_suspensa(codigo, nome)
                             # Notifica quando volta a ficar ATIVA (resolução)
                             elif status.upper() == "ATIVA" and eh_status_monitorado(status_anterior):
                                 await self.enviar_mensagem_reativacao(codigo, nome, status_anterior)
@@ -493,6 +529,19 @@ class MyBot(discord.Client):
                             logger.info(f"   Primeira carga: anotando {codigo} sem notificar Discord")
 
                 # FIM DO LOOP - Atualiza dados salvos APÓS processar TODAS as linhas
+                # PROTEÇÃO: Não salva se os dados novos forem muito menores que os anteriores
+                # (indica leitura incompleta/erro de conexão)
+                dados_anteriores_count = len(self.sheet_data)
+                dados_novos_count = len(novos_dados)
+
+                if dados_anteriores_count > 0 and dados_novos_count < dados_anteriores_count * 0.5:
+                    # Se os novos dados têm menos de 50% dos anteriores, provavelmente houve erro
+                    logger.warning(f"PROTEÇÃO ATIVADA: Dados novos ({dados_novos_count}) muito menores que anteriores ({dados_anteriores_count}). NÃO salvando estado.")
+                    print(f"⚠️ PROTEÇÃO: Leitura incompleta detectada ({dados_novos_count}/{dados_anteriores_count} registros). Estado NÃO será salvo.")
+                    # Não atualiza self.sheet_data nem salva
+                    await asyncio.sleep(150)
+                    continue
+
                 self.sheet_data = novos_dados
                 await self.salvar_estado(novos_dados)
 
@@ -510,9 +559,26 @@ class MyBot(discord.Client):
                 # print(f"{'='*60}\n")
                 # logger.info(f"Verificação concluída. Próxima: {self._proxima_verificacao(hora_atual)}")
 
+            except gspread.exceptions.APIError as e:
+                print(f"Erro de API do Google Sheets: {e}")
+                logger.error(f"Erro de API do Google Sheets: {e}")
+                # Tenta reconectar
+                if tentativas_reconexao < MAX_TENTATIVAS_RECONEXAO:
+                    tentativas_reconexao += 1
+                    logger.warning(f"Tentativa de reconexão {tentativas_reconexao}/{MAX_TENTATIVAS_RECONEXAO}")
+                    if await self.reconectar_sheets():
+                        tentativas_reconexao = 0  # Reset em caso de sucesso
+                else:
+                    logger.error("Máximo de tentativas de reconexão atingido. Aguardando próximo ciclo...")
+                    tentativas_reconexao = 0  # Reset para próximo ciclo
+
             except Exception as e:
                 print(f"Erro ao monitorar planilha: {e}")
                 logger.error(f"Erro ao monitorar planilha: {e}")
+                # Verifica se é erro de conexão e tenta reconectar
+                if "transport" in str(e).lower() or "connection" in str(e).lower() or "timeout" in str(e).lower():
+                    logger.warning("Erro de conexão detectado. Tentando reconectar...")
+                    await self.reconectar_sheets()
 
             # === MODO TESTE: Verifica a cada 2.5 minutos ===
             await asyncio.sleep(150)
@@ -604,6 +670,72 @@ class MyBot(discord.Client):
             print(f"Erro ao salvar histórico: {e}")
             logger.error(f"Erro ao salvar histórico: {e}")
 
+    def carregar_historico_suspensas(self):
+        """Carrega o histórico de empresas suspensas por semana."""
+        caminho = DATA_DIR / "historico_suspensas.json"
+        if caminho.exists():
+            try:
+                with open(caminho, "r", encoding="utf-8") as f:
+                    historico = json.load(f)
+                    print(f"Histórico de suspensas carregado ({len(historico)} semanas).")
+                    logger.info(f"Histórico de suspensas carregado ({len(historico)} semanas).")
+                    return historico
+            except Exception as e:
+                print(f"Erro ao carregar histórico de suspensas: {e}")
+                logger.error(f"Erro ao carregar histórico de suspensas: {e}")
+        return {}
+
+    async def salvar_historico_suspensas(self):
+        """Salva o histórico de empresas suspensas de forma assíncrona."""
+        caminho = DATA_DIR / "historico_suspensas.json"
+
+        def _salvar():
+            with open(caminho, "w", encoding="utf-8") as f:
+                json.dump(self.historico_suspensas, f, indent=4, ensure_ascii=False)
+
+        try:
+            await asyncio.to_thread(_salvar)
+            logger.info("Histórico de suspensas salvo com sucesso.")
+        except Exception as e:
+            print(f"Erro ao salvar histórico de suspensas: {e}")
+            logger.error(f"Erro ao salvar histórico de suspensas: {e}")
+
+    def _obter_semana_ano(self, data=None):
+        """Retorna a chave da semana no formato YYYY-WNN (ex: 2025-W01)."""
+        if data is None:
+            data = datetime.now()
+        # isocalendar retorna (ano, numero_semana, dia_da_semana)
+        ano_iso, semana_iso, _ = data.isocalendar()
+        return f"{ano_iso}-W{semana_iso:02d}"
+
+    def registrar_empresa_suspensa(self, codigo, nome):
+        """Registra uma empresa suspensa no histórico semanal."""
+        agora = datetime.now()
+        semana = self._obter_semana_ano(agora)
+
+        if semana not in self.historico_suspensas:
+            self.historico_suspensas[semana] = {
+                "empresas": [],
+                "total": 0
+            }
+
+        # Verifica se a empresa já foi registrada nesta semana
+        empresas_codigos = [e["codigo"] for e in self.historico_suspensas[semana]["empresas"]]
+        if codigo not in empresas_codigos:
+            self.historico_suspensas[semana]["empresas"].append({
+                "codigo": codigo,
+                "nome": nome,
+                "data_hora": agora.strftime("%d/%m/%Y %H:%M:%S")
+            })
+            self.historico_suspensas[semana]["total"] += 1
+
+            # Agenda o salvamento do histórico (não bloqueia)
+            asyncio.create_task(self.salvar_historico_suspensas())
+
+            logger.info(f"Empresa suspensa registrada: {codigo} - {nome} (Semana: {semana})")
+        else:
+            logger.info(f"Empresa {codigo} já registrada como suspensa nesta semana ({semana})")
+
     def registrar_alteracao(self, tipo, codigo, nome, valor_anterior, valor_novo):
         """Registra uma alteração no histórico mensal."""
         agora = datetime.now()
@@ -679,6 +811,318 @@ class MyBot(discord.Client):
 
             # Verifica a cada 30 minutos (mais frequente para garantir que pega às 09:00)
             await asyncio.sleep(1800)
+
+    async def verificar_relatorio_semanal_suspensas(self):
+        """Verifica se deve enviar o relatório semanal de empresas suspensas (toda segunda-feira às 08:30)."""
+        await self.wait_until_ready()
+        print("Sistema de relatório semanal de suspensas iniciado (Segunda-feira às 08:30)")
+        logger.info("Sistema de relatório semanal de suspensas iniciado (Segunda-feira às 08:30)")
+
+        while not self.is_closed():
+            try:
+                agora = datetime.now()
+
+                # Verifica se é segunda-feira (weekday() == 0)
+                if agora.weekday() == 0:
+                    # Verifica se ainda não enviou hoje e se já são 8:30
+                    if self.ultimo_relatorio_suspensas_enviado != agora.date():
+                        if agora.hour == 8 and agora.minute >= 30:
+                            print(f"\n{'='*60}")
+                            print(f"Gerando relatório semanal de empresas suspensas...")
+                            print(f"{'='*60}")
+                            logger.info("Gerando relatório semanal de empresas suspensas...")
+
+                            # Envia relatório da semana anterior
+                            semana_anterior = self._obter_semana_ano(agora - timedelta(days=7))
+
+                            await self.enviar_relatorio_semanal_suspensas(semana_anterior)
+                            self.ultimo_relatorio_suspensas_enviado = agora.date()
+
+                            print(f"{'='*60}")
+                            print(f"Relatório semanal de suspensas enviado com sucesso!")
+                            print(f"Semana: {semana_anterior}")
+                            print(f"{'='*60}\n")
+                            logger.info(f"Relatório semanal de suspensas enviado! Semana: {semana_anterior}")
+
+            except Exception as e:
+                print(f"Erro ao verificar relatório semanal de suspensas: {e}")
+                logger.error(f"Erro ao verificar relatório semanal de suspensas: {e}")
+
+            # Verifica a cada 15 minutos para garantir que pega às 08:30
+            await asyncio.sleep(900)
+
+    async def enviar_relatorio_semanal_suspensas(self, semana):
+        """Envia o relatório semanal de empresas suspensas."""
+        canal = self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID)
+
+        if not canal:
+            logger.error("Canal de suspensas não encontrado para envio do relatório semanal")
+            print("ERRO: Canal de suspensas não encontrado")
+            return
+
+        if semana not in self.historico_suspensas:
+            print(f"Nenhuma empresa suspensa registrada para a semana {semana}")
+            logger.info(f"Sem empresas suspensas para relatório: {semana}")
+
+            # Envia mensagem informando que não houve suspensões
+            embed = discord.Embed(
+                title=f"Relatório Semanal de Empresas Suspensas",
+                description=f"**Semana: {semana}**\n\nNenhuma empresa foi suspensa nesta semana.",
+                color=0x4CAF50  # Verde - bom sinal
+            )
+            embed.set_footer(text="Canella & Santos • Comunicação Interna")
+            await canal.send("@everyone", embed=embed)
+            return
+
+        dados = self.historico_suspensas[semana]
+        empresas = dados["empresas"]
+        total = dados["total"]
+
+        # Cria o embed principal
+        embed = discord.Embed(
+            title=f"Relatório Semanal de Empresas Suspensas",
+            description=f"**Semana: {semana}**\n\nResumo das empresas que tiveram o status alterado para SUSPENSA durante a semana.",
+            color=0xE91E63  # Rosa - cor de suspensa
+        )
+
+        # Aviso importante sobre atendimento
+        embed.add_field(
+            name="ATENÇÃO - Procedimento de Atendimento",
+            value="Caso algum cliente dessas empresas entre em contato pelo Messenger ou qualquer outro canal solicitando algum serviço, "
+                  "**o mesmo deve ser informado sobre o bloqueio no sistema** e **encaminhado imediatamente ao setor financeiro** "
+                  "para regularização da situação antes de qualquer atendimento.",
+            inline=False
+        )
+
+        # Estatísticas gerais
+        embed.add_field(
+            name="Total de Empresas Suspensas",
+            value=f"**{total}** empresa{'s' if total > 1 else ''}",
+            inline=False
+        )
+
+        # Lista as empresas (limita a 15 no embed para não exceder limite)
+        empresas_texto = []
+        for i, emp in enumerate(empresas):
+            if i >= 15:
+                empresas_texto.append(f"\n_... e mais {total - 15} empresas_")
+                break
+            empresas_texto.append(f"• **{emp['codigo']}** - {emp['nome']}\n  └ {emp['data_hora']}")
+
+        if empresas_texto:
+            # Verifica se o texto excede o limite do Discord (1024 caracteres por field)
+            texto_empresas = "\n".join(empresas_texto)
+            if len(texto_empresas) <= 1024:
+                embed.add_field(
+                    name="Empresas Suspensas",
+                    value=texto_empresas,
+                    inline=False
+                )
+            else:
+                # Divide em múltiplos fields se necessário
+                partes = []
+                parte_atual = []
+                tamanho_atual = 0
+
+                for linha in empresas_texto:
+                    if tamanho_atual + len(linha) + 1 > 1000:
+                        partes.append("\n".join(parte_atual))
+                        parte_atual = [linha]
+                        tamanho_atual = len(linha)
+                    else:
+                        parte_atual.append(linha)
+                        tamanho_atual += len(linha) + 1
+
+                if parte_atual:
+                    partes.append("\n".join(parte_atual))
+
+                for idx, parte in enumerate(partes[:3]):  # Máximo 3 fields
+                    embed.add_field(
+                        name=f"Empresas Suspensas {f'(Parte {idx+1})' if len(partes) > 1 else ''}",
+                        value=parte,
+                        inline=False
+                    )
+
+        embed.add_field(
+            name="Ação Necessária",
+            value="Verifique a situação de cada empresa e tome as providências necessárias para regularização.",
+            inline=False
+        )
+
+        # Calcula a data do próximo relatório (próxima segunda-feira às 08:30)
+        agora = datetime.now()
+        dias_ate_segunda = (7 - agora.weekday()) % 7
+        if dias_ate_segunda == 0:
+            dias_ate_segunda = 7  # Se hoje é segunda, próximo é semana que vem
+        proxima_segunda = agora + timedelta(days=dias_ate_segunda)
+        proximo_relatorio = proxima_segunda.strftime("%d/%m/%Y") + " às 08:30"
+
+        embed.add_field(
+            name="📅 Próximo Relatório",
+            value=f"**{proximo_relatorio}**",
+            inline=False
+        )
+
+        embed.set_footer(text=f"Canella & Santos • Semana: {semana}")
+
+        # Envia mensagem de alerta antes do embed
+        mensagem_alerta = (
+            "@everyone\n"
+            "🚨 **RELATÓRIO SEMANAL DE EMPRESAS SUSPENSAS** 🚨\n\n"
+            "⚠️ Atenção equipe! Segue o relatório semanal com todas as empresas que foram suspensas. "
+            "Verifiquem com atenção antes de realizar qualquer atendimento!"
+        )
+        await canal.send(mensagem_alerta)
+        await canal.send(embed=embed)
+        logger.info(f"Relatório semanal de suspensas enviado: {semana}")
+
+        # Se houver muitas empresas, envia também um PDF detalhado
+        if total > 10:
+            await self.enviar_relatorio_suspensas_pdf(canal, semana, empresas)
+
+    async def enviar_relatorio_suspensas_pdf(self, canal, semana, empresas):
+        """Gera e envia relatório de empresas suspensas em PDF."""
+        try:
+            from reportlab.lib import colors
+            from reportlab.lib.pagesizes import A4
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import cm
+
+            # Cria o arquivo PDF
+            pdf_filename = DATA_DIR / f"relatorio_suspensas_{semana}.pdf"
+            doc = SimpleDocTemplate(
+                str(pdf_filename),
+                pagesize=A4,
+                title=f"Relatório Semanal de Suspensas - {semana} - Canella & Santos",
+                author="Canella & Santos Contabilidade",
+                subject="Relatório Semanal de Empresas Suspensas"
+            )
+            elements = []
+
+            # Estilos
+            styles = getSampleStyleSheet()
+            title_style = ParagraphStyle(
+                'CustomTitle',
+                parent=styles['Heading1'],
+                fontSize=16,
+                textColor=colors.HexColor('#E91E63'),
+                spaceAfter=30,
+                alignment=1  # Center
+            )
+
+            heading_style = ParagraphStyle(
+                'CustomHeading',
+                parent=styles['Heading2'],
+                fontSize=12,
+                textColor=colors.HexColor('#C2185B'),
+                spaceAfter=12,
+            )
+
+            # Estilo para aviso
+            aviso_style = ParagraphStyle(
+                'AvisoStyle',
+                parent=styles['Normal'],
+                fontSize=9,
+                textColor=colors.HexColor('#C2185B'),
+                spaceAfter=12,
+                borderColor=colors.HexColor('#E91E63'),
+                borderWidth=1,
+                borderPadding=8,
+                backColor=colors.HexColor('#FCE4EC'),
+            )
+
+            # Título
+            elements.append(Paragraph(f"RELATÓRIO SEMANAL DE EMPRESAS SUSPENSAS", title_style))
+            elements.append(Paragraph(f"Semana: {semana}", styles['Normal']))
+            elements.append(Paragraph(f"CANELLA & SANTOS CONTABILIDADE EIRELI", styles['Normal']))
+            elements.append(Spacer(1, 0.5*cm))
+
+            # Aviso importante
+            aviso_texto = (
+                "<b>ATENÇÃO - PROCEDIMENTO DE ATENDIMENTO:</b><br/>"
+                "Caso algum cliente dessas empresas entre em contato pelo Messenger ou qualquer outro canal "
+                "solicitando algum serviço, o mesmo deve ser informado sobre o bloqueio no sistema e "
+                "encaminhado imediatamente ao setor financeiro para regularização da situação antes de qualquer atendimento."
+            )
+            elements.append(Paragraph(aviso_texto, aviso_style))
+            elements.append(Spacer(1, 0.5*cm))
+
+            # Estatísticas gerais
+            elements.append(Paragraph("RESUMO", heading_style))
+            stats_data = [
+                ['Total de Empresas Suspensas', str(len(empresas))],
+            ]
+            stats_table = Table(stats_data, colWidths=[12*cm, 5*cm])
+            stats_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#FCE4EC')),
+                ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, -1), 10),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+                ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#E91E63'))
+            ]))
+            elements.append(stats_table)
+            elements.append(Spacer(1, 0.5*cm))
+
+            # Lista de empresas
+            elements.append(Paragraph("EMPRESAS SUSPENSAS", heading_style))
+            elements.append(Spacer(1, 0.3*cm))
+
+            # Tabela de empresas
+            data = [['Código', 'Nome da Empresa', 'Data/Hora da Suspensão']]
+
+            for emp in empresas:
+                data.append([
+                    emp['codigo'],
+                    emp['nome'][:40] + ('...' if len(emp['nome']) > 40 else ''),
+                    emp['data_hora']
+                ])
+
+            table = Table(data, colWidths=[3*cm, 9*cm, 5*cm])
+            table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E91E63')),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 9),
+                ('FONTSIZE', (0, 1), (-1, -1), 8),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#FCE4EC')),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#FCE4EC'), colors.HexColor('#F8BBD9')])
+            ]))
+            elements.append(table)
+            elements.append(Spacer(1, 0.5*cm))
+
+            # Rodapé
+            elements.append(Paragraph(
+                f"Relatório gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+                styles['Normal']
+            ))
+
+            # Gera o PDF
+            def _gerar_pdf():
+                doc.build(elements)
+
+            await asyncio.to_thread(_gerar_pdf)
+
+            # Envia o arquivo
+            await canal.send(
+                "📄 Relatório detalhado em PDF:",
+                file=discord.File(str(pdf_filename))
+            )
+
+            logger.info(f"Relatório de suspensas em PDF enviado: {semana}")
+            print(f"Relatório de suspensas em PDF enviado: {pdf_filename}")
+
+        except ImportError:
+            logger.warning("ReportLab não instalado. Não foi possível gerar PDF de suspensas.")
+            await canal.send("⚠️ PDF não disponível: ReportLab não instalado.")
+        except Exception as e:
+            logger.error(f"Erro ao gerar relatório de suspensas em PDF: {e}")
+            print(f"Erro ao gerar relatório de suspensas: {e}")
 
     async def enviar_relatorio_mensal(self, competencia):
         """Envia o relatório mensal de alterações."""
@@ -913,7 +1357,13 @@ class MyBot(discord.Client):
 
             # Cria o arquivo PDF
             pdf_filename = DATA_DIR / f"relatorio_detalhado_{competencia}.pdf"
-            doc = SimpleDocTemplate(str(pdf_filename), pagesize=A4)
+            doc = SimpleDocTemplate(
+                str(pdf_filename),
+                pagesize=A4,
+                title=f"Relatório Mensal de Alterações - {mes_nome} - Canella & Santos",
+                author="Canella & Santos Contabilidade",
+                subject="Relatório Mensal de Alterações"
+            )
             elements = []
 
             # Estilos
@@ -1108,7 +1558,13 @@ class MyBot(discord.Client):
 
             # Cria o arquivo PDF
             pdf_filename = DATA_DIR / f"relatorio_anual_{ano}.pdf"
-            doc = SimpleDocTemplate(str(pdf_filename), pagesize=A4)
+            doc = SimpleDocTemplate(
+                str(pdf_filename),
+                pagesize=A4,
+                title=f"Relatório Anual de Alterações - {ano} - Canella & Santos",
+                author="Canella & Santos Contabilidade",
+                subject="Relatório Anual de Alterações"
+            )
             elements = []
 
             # Estilos
@@ -1273,16 +1729,23 @@ class MyBot(discord.Client):
             await canal.send(f"⚠️ Erro ao gerar relatório anual em PDF: {str(e)}")
 
     async def enviar_mensagem(self, codigo, nome, status):
-        canal = self.get_channel(DISCORD_CHANNEL_ID)
-        
+        # Define o canal baseado no status
+        # Empresas SUSPENSAS vão para o canal específico de suspensas
+        if status == "SUSPENSA":
+            canal = self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID)
+            canal_nome = "suspensas"
+        else:
+            canal = self.get_channel(DISCORD_CHANNEL_ID)
+            canal_nome = "principal"
+
         # Cores para cada status
         cores = {
-            "INATIVO": 0xFF9800,      # Laranja
+            "INATIVA": 0xFF9800,      # Laranja
             "BAIXA": 0xF44336,        # Vermelho
             "DEVOLVIDA": 0x9C27B0,    # Roxo
             "SUSPENSA": 0xE91E63      # Rosa
         }
-        
+
         embed = discord.Embed(
             title="Alteração de Status - Empresa",
             description=f"**{codigo}** - {nome}",
@@ -1291,11 +1754,21 @@ class MyBot(discord.Client):
         embed.add_field(name="Novo Status", value=f"**{status}**", inline=False)
         embed.add_field(name="Data/Hora", value=self.ultima_verificacao, inline=True)
         embed.add_field(name="\u200b", value="\u200b", inline=True)  # Campo vazio para padronizar
+
+        # Adiciona aviso especial para empresas suspensas
+        if status == "SUSPENSA":
+            embed.add_field(
+                name="Procedimento de Atendimento",
+                value="Caso o cliente entre em contato solicitando algum serviço, "
+                      "**informe sobre o bloqueio no sistema** e **encaminhe ao setor financeiro** para regularização.",
+                inline=False
+            )
+
         embed.set_footer(text="Canella & Santos • Comunicação Interna")
 
         await canal.send("@everyone", embed=embed)
-        logger.info(f"Mensagem enviada: {codigo} - {nome} -> {status}")
-        print(f"Mensagem enviada: {codigo} - {nome} -> {status}")
+        logger.info(f"Mensagem enviada ({canal_nome}): {codigo} - {nome} -> {status}")
+        print(f"Mensagem enviada ({canal_nome}): {codigo} - {nome} -> {status}")
 
     async def enviar_mensagem_nova_empresa(self, codigo, nome, status, regime_tributario=""):
         canal = self.get_channel(DISCORD_CHANNEL_ID)
@@ -1318,11 +1791,18 @@ class MyBot(discord.Client):
 
     async def enviar_mensagem_reativacao(self, codigo, nome, status_anterior):
         """Envia notificação quando empresa volta a ficar ATIVA."""
-        canal = self.get_channel(DISCORD_CHANNEL_ID)
+        # Define o canal baseado no status anterior
+        # Reativações de empresas que estavam SUSPENSAS vão para o canal específico
+        if status_anterior == "SUSPENSA":
+            canal = self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID)
+            canal_nome = "suspensas"
+        else:
+            canal = self.get_channel(DISCORD_CHANNEL_ID)
+            canal_nome = "principal"
 
         # Mapeamento de status anteriores
         status_info = {
-            "INATIVO": ("INATIVA", 0xFF9800),      # Laranja
+            "INATIVA": ("INATIVA", 0xFF9800),     # Laranja
             "BAIXA": ("BAIXA", 0xF44336),          # Vermelho
             "DEVOLVIDA": ("DEVOLVIDA", 0x9C27B0),  # Roxo
             "SUSPENSA": ("SUSPENSA", 0xE91E63)     # Rosa
@@ -1355,8 +1835,8 @@ class MyBot(discord.Client):
         embed.set_footer(text="Canella & Santos • Comunicação Interna")
 
         await canal.send("@everyone", embed=embed)
-        logger.info(f"Mensagem de reativação enviada: {codigo} - {nome} ({status_anterior} -> ATIVA)")
-        print(f"Mensagem de reativação enviada: {codigo} - {nome} ({status_anterior} -> ATIVA)")
+        logger.info(f"Mensagem de reativação enviada ({canal_nome}): {codigo} - {nome} ({status_anterior} -> ATIVA)")
+        print(f"Mensagem de reativação enviada ({canal_nome}): {codigo} - {nome} ({status_anterior} -> ATIVA)")
 
     async def enviar_mensagem_regime_tributario(self, codigo, nome, regime_anterior, regime_novo):
         """Envia notificação quando há mudança de regime tributário."""
@@ -1494,11 +1974,36 @@ async def help_command(interaction: discord.Interaction):
     )
 
     embed.add_field(
+        name="/relatorio-suspensas [semana]",
+        value="Gera relatório semanal de empresas suspensas\n"
+              "* Sem parâmetros: semana atual\n"
+              "* Com parâmetro: semana específica (formato YYYY-WNN)\n"
+              "Exemplo: `/relatorio-suspensas 2025-W01`",
+        inline=False
+    )
+
+    embed.add_field(
+        name="/historico-suspensas",
+        value="Mostra todas as semanas com empresas suspensas registradas\n"
+              "(Visão resumida por semana)",
+        inline=False
+    )
+
+    embed.add_field(
+        name="/empresas-suspensas",
+        value="Lista todas as empresas **atualmente** suspensas no sistema\n"
+              "* Gera PDF com código, status e regime tributário\n"
+              "* Baseado nos dados mais recentes da planilha",
+        inline=False
+    )
+
+    embed.add_field(
         name="Notificações Automáticas",
         value="* Quando empresa fica INATIVA/BAIXA/DEVOLVIDA/SUSPENSA\n"
               "* Quando empresa volta a ficar ATIVA\n"
               "* Quando há mudança de regime tributário\n"
-              f"* Relatório mensal automático (dia {DIA_RELATORIO_MENSAL})",
+              f"* Relatório mensal automático (dia {DIA_RELATORIO_MENSAL})\n"
+              "* Relatório semanal de suspensas (Segunda-feira 08:30)",
         inline=False
     )
 
@@ -1673,6 +2178,347 @@ async def relatorio_anual(interaction: discord.Interaction, ano: int = None):
     except Exception as e:
         await interaction.followup.send(f"Erro ao gerar relatório anual: {str(e)}")
         logger.error(f"Erro no comando /relatorio-anual: {e}")
+
+@bot.tree.command(name="relatorio-suspensas", description="Gera relatório semanal de empresas suspensas")
+@app_commands.describe(
+    semana="Semana no formato YYYY-WNN (ex: 2025-W01). Deixe vazio para a semana atual."
+)
+async def relatorio_suspensas(interaction: discord.Interaction, semana: str = None):
+    """
+    Gera relatório semanal de empresas suspensas.
+
+    Args:
+        semana: Semana no formato YYYY-WNN (ex: 2025-W01). Se não informado, usa a semana atual.
+    """
+    await interaction.response.defer()  # Indica que o bot está processando
+
+    try:
+        # Define a semana
+        if semana is None:
+            semana = bot._obter_semana_ano()
+
+        # Valida o formato da semana
+        if not semana.startswith("20") or "-W" not in semana:
+            await interaction.followup.send(
+                f"Formato de semana inválido! Use o formato YYYY-WNN (ex: 2025-W01)."
+            )
+            return
+
+        # Verifica se há dados para a semana
+        if semana not in bot.historico_suspensas:
+            await interaction.followup.send(
+                f"Nenhuma empresa suspensa registrada para a semana {semana}."
+            )
+            logger.info(f"Comando /relatorio-suspensas executado por {interaction.user} - Sem dados para {semana}")
+            return
+
+        # Envia o relatório
+        await bot.enviar_relatorio_semanal_suspensas(semana)
+
+        await interaction.followup.send(
+            f"Relatório de suspensas da semana {semana} enviado com sucesso!"
+        )
+        logger.info(f"Comando /relatorio-suspensas executado por {interaction.user} - Semana: {semana}")
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao gerar relatório de suspensas: {str(e)}")
+        logger.error(f"Erro no comando /relatorio-suspensas: {e}")
+
+@bot.tree.command(name="historico-suspensas", description="Mostra semanas com empresas suspensas registradas")
+async def cmd_historico_suspensas(interaction: discord.Interaction):
+    """Mostra as semanas que têm empresas suspensas registradas."""
+
+    if not bot.historico_suspensas:
+        await interaction.response.send_message("Nenhum histórico de empresas suspensas registrado ainda.")
+        return
+
+    embed = discord.Embed(
+        title="Histórico de Empresas Suspensas",
+        description="Semanas com empresas suspensas registradas",
+        color=0xE91E63
+    )
+
+    # Ordena as semanas (mais recente primeiro)
+    semanas_ordenadas = sorted(bot.historico_suspensas.keys(), reverse=True)
+
+    # Lista as semanas (limita a 12)
+    for semana in semanas_ordenadas[:12]:
+        dados = bot.historico_suspensas[semana]
+        total = dados["total"]
+
+        embed.add_field(
+            name=f"Semana {semana}",
+            value=f"**{total}** empresa{'s' if total > 1 else ''} suspensa{'s' if total > 1 else ''}",
+            inline=True
+        )
+
+    embed.set_footer(text=f"Canella & Santos • Use /relatorio-suspensas para relatório detalhado")
+
+    await interaction.response.send_message(embed=embed)
+    logger.info(f"Comando /historico-suspensas executado por {interaction.user}")
+
+@bot.tree.command(name="empresas-suspensas", description="Lista todas as empresas atualmente suspensas")
+async def cmd_empresas_suspensas(interaction: discord.Interaction):
+    """Lista todas as empresas que estão atualmente com status SUSPENSA."""
+    await interaction.response.defer()  # Indica que o bot está processando
+
+    try:
+        # Busca dados diretamente da planilha para ter código, nome, status e regime
+        data = await asyncio.to_thread(bot.sheet.get_all_values)
+
+        # Filtra empresas suspensas
+        empresas_suspensas_lista = []
+        for row in data[1:]:  # Pula o cabeçalho
+            if len(row) < 3:
+                continue
+
+            codigo = str(row[0]).strip()
+            nome = str(row[1]).strip()
+            status_bruto = str(row[2]).upper().strip()
+            regime_bruto = str(row[3]).upper().strip() if len(row) > 3 else ""
+
+            # Normaliza os valores
+            status = normalizar_status(status_bruto)
+            regime = normalizar_regime(regime_bruto)
+
+            if status == "SUSPENSA":
+                empresas_suspensas_lista.append({
+                    "codigo": codigo,
+                    "nome": nome,
+                    "status": status,
+                    "regime": regime if regime else "Não definido"
+                })
+
+        if not empresas_suspensas_lista:
+            embed = discord.Embed(
+                title="Empresas Atualmente Suspensas",
+                description="Nenhuma empresa está suspensa no momento.",
+                color=0x4CAF50  # Verde - bom sinal
+            )
+            embed.set_footer(text="Canella & Santos • Comunicação Interna")
+            await interaction.followup.send(embed=embed)
+            return
+
+        total = len(empresas_suspensas_lista)
+
+        # Ordena por código numérico (extrai número do código)
+        def extrair_numero(codigo):
+            try:
+                # Remove caracteres não numéricos e converte para int
+                numeros = ''.join(filter(str.isdigit, codigo))
+                return int(numeros) if numeros else 0
+            except:
+                return 0
+
+        empresas_suspensas_lista.sort(key=lambda x: extrair_numero(x["codigo"]))
+
+        # Cria o embed principal
+        embed = discord.Embed(
+            title="Empresas Atualmente Suspensas",
+            description=f"Lista de todas as empresas com status **SUSPENSA** no sistema.",
+            color=0xE91E63  # Rosa - cor de suspensa
+        )
+
+        # Aviso importante sobre atendimento
+        embed.add_field(
+            name="ATENÇÃO - Procedimento de Atendimento",
+            value="Caso algum cliente dessas empresas entre em contato pelo Messenger ou qualquer outro canal solicitando algum serviço, "
+                  "**o mesmo deve ser informado sobre o bloqueio no sistema** e **encaminhado imediatamente ao setor financeiro** "
+                  "para regularização da situação antes de qualquer atendimento.",
+            inline=False
+        )
+
+        # Estatísticas gerais
+        embed.add_field(
+            name="Total de Empresas Suspensas",
+            value=f"**{total}** empresa{'s' if total > 1 else ''}",
+            inline=False
+        )
+
+        # Lista as empresas (limita a 10 no embed)
+        empresas_texto = []
+        for i, emp in enumerate(empresas_suspensas_lista):
+            if i >= 10:
+                empresas_texto.append(f"\n_... e mais {total - 10} empresas (veja o PDF)_")
+                break
+            empresas_texto.append(f"• **{emp['codigo']}** - {emp['nome']}")
+
+        if empresas_texto:
+            texto_empresas = "\n".join(empresas_texto)
+            if len(texto_empresas) <= 1024:
+                embed.add_field(
+                    name="Empresas",
+                    value=texto_empresas,
+                    inline=False
+                )
+
+        embed.set_footer(text=f"Canella & Santos • Dados atualizados em: {bot.ultima_verificacao or 'N/A'}")
+
+        # Envia mensagem de alerta antes do embed
+        mensagem_alerta = (
+            "@everyone\n"
+            "🚨 **RELATÓRIO DE EMPRESAS SUSPENSAS** 🚨\n\n"
+            "⚠️ Atenção equipe! Segue abaixo a lista atualizada de todas as empresas que estão com o status **SUSPENSA** no sistema. "
+            "Verifiquem com atenção antes de realizar qualquer atendimento!"
+        )
+        await interaction.followup.send(mensagem_alerta)
+
+        # Envia o embed com os dados
+        await interaction.channel.send(embed=embed)
+
+        # Sempre gera e envia o PDF detalhado
+        await enviar_pdf_empresas_suspensas_atuais(interaction.channel, empresas_suspensas_lista)
+
+        logger.info(f"Comando /empresas-suspensas executado por {interaction.user} - {total} empresas")
+
+    except Exception as e:
+        await interaction.followup.send(f"Erro ao listar empresas suspensas: {str(e)}")
+        logger.error(f"Erro no comando /empresas-suspensas: {e}")
+
+async def enviar_pdf_empresas_suspensas_atuais(canal, empresas):
+    """Gera e envia PDF com todas as empresas atualmente suspensas."""
+    try:
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4
+        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import cm
+
+        # Cria o arquivo PDF
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pdf_filename = DATA_DIR / f"empresas_suspensas_atuais_{timestamp}.pdf"
+        doc = SimpleDocTemplate(
+            str(pdf_filename),
+            pagesize=A4,
+            title="Empresas Atualmente Suspensas - Canella & Santos",
+            author="Canella & Santos Contabilidade",
+            subject="Relatório de Empresas Suspensas"
+        )
+        elements = []
+
+        # Estilos
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=16,
+            textColor=colors.HexColor('#E91E63'),
+            spaceAfter=30,
+            alignment=1  # Center
+        )
+
+        heading_style = ParagraphStyle(
+            'CustomHeading',
+            parent=styles['Heading2'],
+            fontSize=12,
+            textColor=colors.HexColor('#C2185B'),
+            spaceAfter=12,
+        )
+
+        aviso_style = ParagraphStyle(
+            'AvisoStyle',
+            parent=styles['Normal'],
+            fontSize=9,
+            textColor=colors.HexColor('#C2185B'),
+            spaceAfter=12,
+            borderColor=colors.HexColor('#E91E63'),
+            borderWidth=1,
+            borderPadding=8,
+            backColor=colors.HexColor('#FCE4EC'),
+        )
+
+        # Título
+        elements.append(Paragraph("EMPRESAS ATUALMENTE SUSPENSAS", title_style))
+        elements.append(Paragraph(f"Data: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}", styles['Normal']))
+        elements.append(Paragraph("CANELLA & SANTOS CONTABILIDADE EIRELI", styles['Normal']))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Aviso importante
+        aviso_texto = (
+            "<b>ATENÇÃO - PROCEDIMENTO DE ATENDIMENTO:</b><br/>"
+            "Caso algum cliente dessas empresas entre em contato pelo Messenger ou qualquer outro canal "
+            "solicitando algum serviço, o mesmo deve ser informado sobre o bloqueio no sistema e "
+            "encaminhado imediatamente ao setor financeiro para regularização da situação antes de qualquer atendimento."
+        )
+        elements.append(Paragraph(aviso_texto, aviso_style))
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Estatísticas gerais
+        elements.append(Paragraph("RESUMO", heading_style))
+        stats_data = [
+            ['Total de Empresas Suspensas', str(len(empresas))],
+        ]
+        stats_table = Table(stats_data, colWidths=[12*cm, 5*cm])
+        stats_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#FCE4EC')),
+            ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+            ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#E91E63'))
+        ]))
+        elements.append(stats_table)
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Lista de empresas
+        elements.append(Paragraph("LISTA DE EMPRESAS SUSPENSAS", heading_style))
+        elements.append(Spacer(1, 0.3*cm))
+
+        # Tabela de empresas
+        data = [['Código', 'Nome da Empresa', 'Regime Tributário']]
+
+        for emp in empresas:
+            nome = emp.get('nome', 'N/A')
+            data.append([
+                emp['codigo'],
+                nome[:35] + ('...' if len(nome) > 35 else ''),
+                emp['regime'][:20] + ('...' if len(emp['regime']) > 20 else '')
+            ])
+
+        table = Table(data, colWidths=[2.5*cm, 10*cm, 4.5*cm])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E91E63')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, 0), 9),
+            ('FONTSIZE', (0, 1), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#FCE4EC')),
+            ('GRID', (0, 0), (-1, -1), 1, colors.black),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#FCE4EC'), colors.HexColor('#F8BBD9')])
+        ]))
+        elements.append(table)
+        elements.append(Spacer(1, 0.5*cm))
+
+        # Rodapé
+        elements.append(Paragraph(
+            f"Relatório gerado em: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}",
+            styles['Normal']
+        ))
+
+        # Gera o PDF
+        def _gerar_pdf():
+            doc.build(elements)
+
+        await asyncio.to_thread(_gerar_pdf)
+
+        # Envia o arquivo
+        await canal.send(
+            "📄 Relatório completo em PDF:",
+            file=discord.File(str(pdf_filename))
+        )
+
+        logger.info(f"PDF de empresas suspensas atuais enviado: {pdf_filename}")
+        print(f"PDF de empresas suspensas atuais enviado: {pdf_filename}")
+
+    except ImportError:
+        logger.warning("ReportLab não instalado. Não foi possível gerar PDF.")
+        await canal.send("⚠️ PDF não disponível: ReportLab não instalado.")
+    except Exception as e:
+        logger.error(f"Erro ao gerar PDF de empresas suspensas atuais: {e}")
+        print(f"Erro ao gerar PDF: {e}")
 
 # === INICIALIZAÇÃO DO BOT ===
 if __name__ == "__main__":

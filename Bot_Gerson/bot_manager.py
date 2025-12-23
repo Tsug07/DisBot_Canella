@@ -323,6 +323,9 @@ class BotManager(ctk.CTk):
                     self.stop_btn.configure(state="normal")
                     self.restart_btn.configure(state="normal")
                     self.log(f"Bot detectado em segundo plano (PID: {pid})")
+                    # Agenda auto-restart se estiver habilitado
+                    if self.auto_restart_var.get():
+                        self.schedule_auto_restart()
                 except (OSError, PermissionError):
                     os.remove(self.pid_file)
                     self.log("Arquivo PID invalido removido")
@@ -531,16 +534,30 @@ class BotManager(ctk.CTk):
 
     def schedule_auto_restart(self):
         """Agenda restart automatico"""
+        # Cancela agendamento anterior se existir
+        if hasattr(self, '_auto_restart_job') and self._auto_restart_job:
+            try:
+                self.after_cancel(self._auto_restart_job)
+            except:
+                pass
+            self._auto_restart_job = None
+
         if self.auto_restart_var.get() and self.is_running:
-            interval_ms = self.interval_var.get() * 60 * 60 * 1000
-            self.log(f"Proximo restart em {self.interval_var.get()}h")
-            self.after(interval_ms, self.auto_restart)
+            interval_hours = self.interval_var.get()
+            interval_ms = interval_hours * 60 * 60 * 1000
+            self.log(f"Auto-restart agendado: proximo em {interval_hours}h")
+            self._auto_restart_job = self.after(interval_ms, self.auto_restart)
 
     def auto_restart(self):
         """Executa restart automatico"""
+        self._auto_restart_job = None  # Limpa referencia do job
         if self.auto_restart_var.get() and self.is_running:
-            self.log("Restart automatico programado")
+            self.log("=" * 40)
+            self.log("EXECUTANDO RESTART AUTOMATICO (24h)")
+            self.log("=" * 40)
             self.restart_bot()
+            # Reagenda o proximo restart apos o bot reiniciar
+            # O reagendamento sera feito no start_bot()
 
     def toggle_detached(self):
         """Toggle segundo plano"""
