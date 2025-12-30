@@ -224,6 +224,9 @@ class MyBot(discord.Client):
         self.ultimo_relatorio_enviado = None  # Data do último relatório enviado
         self.ultimo_relatorio_suspensas_enviado = None  # Data do último relatório semanal de suspensas
         self.primeiro_carregamento_completo = verificar_primeiro_carregamento()  # Flag de primeiro carregamento
+        # Sistema de confirmação de mudanças (evita notificações durante edição da planilha)
+        self.mudancas_pendentes = {}  # {codigo: {"tipo": str, "dados": dict, "ciclos": int}}
+        self.CICLOS_CONFIRMACAO = 2  # Número de ciclos para confirmar mudança (2 ciclos = ~5 min)
 
     async def setup_hook(self):
         await self.tree.sync()
@@ -396,10 +399,10 @@ class MyBot(discord.Client):
                     regime_tributario = normalizar_regime(regime_bruto)
 
                     # Log se houver normalização
-                    if status != status_bruto:
-                        logger.info(f"Status normalizado: '{status_bruto}' -> '{status}' ({codigo})")
-                    if regime_tributario != regime_bruto:
-                        logger.info(f"Regime normalizado: '{regime_bruto}' -> '{regime_tributario}' ({codigo})")
+                    # if status != status_bruto:
+                    #     logger.info(f"Status normalizado: '{status_bruto}' -> '{status}' ({codigo})")
+                    # if regime_tributario != regime_bruto:
+                    #     logger.info(f"Regime normalizado: '{regime_bruto}' -> '{regime_tributario}' ({codigo})")
 
                     # PROTEÇÃO: Se a empresa já existe e tinha regime, mas agora veio vazio da planilha
                     # mantém o regime anterior (leitura temporária incompleta do Sheets)
@@ -424,36 +427,83 @@ class MyBot(discord.Client):
                         dados_anterior = self.sheet_data[codigo]
                         status_anterior = dados_anterior.get("status") if isinstance(dados_anterior, dict) else dados_anterior
                         regime_anterior = dados_anterior.get("regime_tributario", "") if isinstance(dados_anterior, dict) else ""
-                        
-                        # Verifica mudança de status
-                        if status != status_anterior:
-                            print(f"\nAlteração detectada na linha {idx}:")
+
+                        chave_pendente = f"status_{codigo}"
+
+                        # Primeiro: verifica se já existe mudança pendente para esta empresa
+                        if chave_pendente in self.mudancas_pendentes:
+                            pendente = self.mudancas_pendentes[chave_pendente]
+
+                            # Se o status atual é igual ao novo status pendente, incrementa ciclos
+                            if pendente["dados"]["status_novo"] == status:
+                                pendente["ciclos"] += 1
+                                print(f"   Mudanca pendente confirmada (ciclo {pendente['ciclos']}/{self.CICLOS_CONFIRMACAO}): {codigo} - {nome}")
+                                logger.info(f"Mudança pendente confirmada (ciclo {pendente['ciclos']}/{self.CICLOS_CONFIRMACAO}): {codigo}")
+
+                                # Se atingiu os ciclos necessários, confirma a mudança
+                                if pendente["ciclos"] >= self.CICLOS_CONFIRMACAO:
+                                    print(f"\n[OK] Mudanca CONFIRMADA apos {self.CICLOS_CONFIRMACAO} ciclos:")
+                                    print(f"   Empresa: {codigo} - {nome}")
+                                    print(f"   Status: {pendente['dados']['status_anterior']} -> {status}")
+                                    logger.info(f"Mudança CONFIRMADA: {codigo} - {nome} ({pendente['dados']['status_anterior']} -> {status})")
+
+                                    # Registra alteração no histórico
+                                    self.registrar_alteracao(
+                                        tipo="status",
+                                        codigo=codigo,
+                                        nome=nome,
+                                        valor_anterior=pendente["dados"]["status_anterior"],
+                                        valor_novo=status
+                                    )
+
+                                    # Notifica sobre status monitorado (problema)
+                                    if eh_status_monitorado(status):
+                                        await self.enviar_mensagem(codigo, nome, status)
+                                        if status == "SUSPENSA":
+                                            self.registrar_empresa_suspensa(codigo, nome)
+                                    # Notifica quando volta a ficar ATIVA (resolução)
+                                    elif status.upper() == "ATIVA" and eh_status_monitorado(pendente["dados"]["status_anterior"]):
+                                        await self.enviar_mensagem_reativacao(codigo, nome, pendente["dados"]["status_anterior"])
+                                        if pendente["dados"]["status_anterior"] == "SUSPENSA":
+                                            self.remover_empresa_suspensa(codigo)
+                                    else:
+                                        print(f"   Status nao requer notificacao: {status}")
+                                        logger.info(f"Status não requer notificação: {status}")
+
+                                    # Remove da lista de pendentes
+                                    del self.mudancas_pendentes[chave_pendente]
+
+                            # Se o status voltou ao original, cancela a pendência
+                            elif status == pendente["dados"]["status_anterior"]:
+                                print(f"   [X] Mudanca cancelada (voltou ao original): {codigo} - {nome}")
+                                logger.info(f"Mudança cancelada (voltou ao original): {codigo} - {nome}")
+                                del self.mudancas_pendentes[chave_pendente]
+
+                            else:
+                                # Status mudou para um terceiro valor (instabilidade), reseta o contador
+                                print(f"   [!] Mudanca instavel detectada: {codigo} - status oscilando")
+                                logger.warning(f"Mudança instável: {codigo} - status oscilando ({pendente['dados']['status_novo']} -> {status})")
+                                del self.mudancas_pendentes[chave_pendente]
+
+                        # Segundo: verifica se há nova mudança de status (apenas se não tem pendência)
+                        elif status != status_anterior:
+                            # Nova mudança detectada - adiciona como pendente
+                            print(f"\n[PENDENTE] Mudanca detectada (aguardando confirmacao):")
                             print(f"   Empresa: {codigo} - {nome}")
                             print(f"   Status anterior: {status_anterior}")
                             print(f"   Novo status: {status}")
-                            logger.info(f"Alteração detectada na linha {idx}: {codigo} - {nome} ({status_anterior} -> {status})")
+                            print(f"   Aguardando {self.CICLOS_CONFIRMACAO} ciclos para confirmar...")
+                            logger.info(f"Mudança pendente: {codigo} - {nome} ({status_anterior} -> {status})")
 
-                            # Registra alteração no histórico
-                            self.registrar_alteracao(
-                                tipo="status",
-                                codigo=codigo,
-                                nome=nome,
-                                valor_anterior=status_anterior,
-                                valor_novo=status
-                            )
-
-                            # Notifica sobre status monitorado (problema)
-                            if eh_status_monitorado(status):
-                                await self.enviar_mensagem(codigo, nome, status)
-                                # Registra empresa suspensa para relatório semanal
-                                if status == "SUSPENSA":
-                                    self.registrar_empresa_suspensa(codigo, nome)
-                            # Notifica quando volta a ficar ATIVA (resolução)
-                            elif status.upper() == "ATIVA" and eh_status_monitorado(status_anterior):
-                                await self.enviar_mensagem_reativacao(codigo, nome, status_anterior)
-                            else:
-                                print(f"   Status não requer notificação: {status}")
-                                logger.info(f"Status não requer notificação: {status}")
+                            self.mudancas_pendentes[chave_pendente] = {
+                                "tipo": "status",
+                                "dados": {
+                                    "nome": nome,
+                                    "status_anterior": status_anterior,
+                                    "status_novo": status
+                                },
+                                "ciclos": 1
+                            }
                         
                         # Verifica mudança de regime tributário
                         regime_anterior_valido = regime_anterior if regime_anterior else ""
@@ -528,8 +578,7 @@ class MyBot(discord.Client):
                         else:
                             logger.info(f"   Primeira carga: anotando {codigo} sem notificar Discord")
 
-                # FIM DO LOOP - Atualiza dados salvos APÓS processar TODAS as linhas
-                # PROTEÇÃO: Não salva se os dados novos forem muito menores que os anteriores
+                # FIM DO LOOP - PROTEÇÃO: Não salva se os dados novos forem muito menores que os anteriores
                 # (indica leitura incompleta/erro de conexão)
                 dados_anteriores_count = len(self.sheet_data)
                 dados_novos_count = len(novos_dados)
@@ -736,6 +785,38 @@ class MyBot(discord.Client):
         else:
             logger.info(f"Empresa {codigo} já registrada como suspensa nesta semana ({semana})")
 
+    def remover_empresa_suspensa(self, codigo):
+        """Remove uma empresa do histórico de suspensas quando ela volta a ficar ATIVA.
+        Isso garante que o relatório semanal mostre apenas empresas que ESTÃO suspensas."""
+        empresa_removida = False
+
+        # Percorre todas as semanas do histórico
+        for semana in list(self.historico_suspensas.keys()):
+            dados_semana = self.historico_suspensas[semana]
+            empresas = dados_semana.get("empresas", [])
+
+            # Procura a empresa pelo código
+            for i, emp in enumerate(empresas):
+                if emp["codigo"] == codigo:
+                    nome_empresa = emp["nome"]
+                    empresas.pop(i)
+                    dados_semana["total"] = len(empresas)
+                    empresa_removida = True
+                    logger.info(f"Empresa removida do histórico de suspensas: {codigo} - {nome_empresa} (Semana: {semana})")
+                    print(f"   Empresa {codigo} removida do histórico de suspensas (voltou a ficar ATIVA)")
+                    break
+
+            # Se a semana ficou sem empresas, remove a entrada
+            if dados_semana["total"] == 0:
+                del self.historico_suspensas[semana]
+                logger.info(f"Semana {semana} removida do histórico (sem empresas suspensas)")
+
+        # Salva o histórico atualizado
+        if empresa_removida:
+            asyncio.create_task(self.salvar_historico_suspensas())
+
+        return empresa_removida
+
     def registrar_alteracao(self, tipo, codigo, nome, valor_anterior, valor_novo):
         """Registra uma alteração no histórico mensal."""
         agora = datetime.now()
@@ -852,7 +933,7 @@ class MyBot(discord.Client):
             await asyncio.sleep(900)
 
     async def enviar_relatorio_semanal_suspensas(self, semana):
-        """Envia o relatório semanal de empresas suspensas."""
+        """Envia o relatório semanal de TODAS as empresas atualmente suspensas."""
         canal = self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID)
 
         if not canal:
@@ -860,28 +941,62 @@ class MyBot(discord.Client):
             print("ERRO: Canal de suspensas não encontrado")
             return
 
-        if semana not in self.historico_suspensas:
-            print(f"Nenhuma empresa suspensa registrada para a semana {semana}")
-            logger.info(f"Sem empresas suspensas para relatório: {semana}")
+        # Busca dados atualizados da planilha (1 requisição por semana)
+        try:
+            data = await asyncio.to_thread(self.sheet.get_all_values)
+        except Exception as e:
+            logger.error(f"Erro ao buscar dados da planilha para relatório semanal: {e}")
+            print(f"ERRO ao buscar planilha para relatório: {e}")
+            return
 
-            # Envia mensagem informando que não houve suspensões
+        # Filtra TODAS as empresas atualmente suspensas
+        empresas = []
+        for row in data[1:]:  # Pula o cabeçalho
+            if len(row) < 3:
+                continue
+
+            codigo = str(row[0]).strip()
+            nome = str(row[1]).strip()
+            status_bruto = str(row[2]).upper().strip()
+
+            # Normaliza o status
+            status = normalizar_status(status_bruto)
+
+            if status == "SUSPENSA":
+                empresas.append({
+                    "codigo": codigo,
+                    "nome": nome
+                })
+
+        # Ordena por código numérico
+        def extrair_numero(codigo):
+            try:
+                numeros = ''.join(filter(str.isdigit, codigo))
+                return int(numeros) if numeros else 0
+            except:
+                return 0
+
+        empresas.sort(key=lambda x: extrair_numero(x["codigo"]))
+        total = len(empresas)
+
+        if total == 0:
+            print(f"Nenhuma empresa suspensa no momento")
+            logger.info(f"Relatório semanal: nenhuma empresa suspensa atualmente")
+
+            # Envia mensagem informando que não há suspensas
             embed = discord.Embed(
-                title=f"Relatório Semanal de Empresas Suspensas",
-                description=f"**Semana: {semana}**\n\nNenhuma empresa foi suspensa nesta semana.",
+                title=f"📊 Relatório Semanal de Empresas Suspensas",
+                description=f"**Semana: {semana}**\n\n✅ **Nenhuma empresa está suspensa no momento!**",
                 color=0x4CAF50  # Verde - bom sinal
             )
             embed.set_footer(text="Canella & Santos • Comunicação Interna")
             await canal.send("@everyone", embed=embed)
             return
 
-        dados = self.historico_suspensas[semana]
-        empresas = dados["empresas"]
-        total = dados["total"]
-
         # Cria o embed principal
         embed = discord.Embed(
-            title=f"Relatório Semanal de Empresas Suspensas",
-            description=f"**Semana: {semana}**\n\nResumo das empresas que tiveram o status alterado para SUSPENSA durante a semana.",
+            title=f"📊 Relatório Semanal de Empresas Suspensas",
+            description=f"**Semana: {semana}**\n\nLista de **TODAS** as empresas que estão atualmente com status SUSPENSA no sistema.",
             color=0xE91E63  # Rosa - cor de suspensa
         )
 
@@ -907,7 +1022,7 @@ class MyBot(discord.Client):
             if i >= 15:
                 empresas_texto.append(f"\n_... e mais {total - 15} empresas_")
                 break
-            empresas_texto.append(f"• **{emp['codigo']}** - {emp['nome']}\n  └ {emp['data_hora']}")
+            empresas_texto.append(f"• **{emp['codigo']}** - {emp['nome']}")
 
         if empresas_texto:
             # Verifica se o texto excede o limite do Discord (1024 caracteres por field)
@@ -969,7 +1084,7 @@ class MyBot(discord.Client):
         mensagem_alerta = (
             "@everyone\n"
             "🚨 **RELATÓRIO SEMANAL DE EMPRESAS SUSPENSAS** 🚨\n\n"
-            "⚠️ Atenção equipe! Segue o relatório semanal com todas as empresas que foram suspensas. "
+            "⚠️ Atenção equipe! Segue o relatório semanal com **TODAS** as empresas que estão suspensas atualmente. "
             "Verifiquem com atenção antes de realizar qualquer atendimento!"
         )
         await canal.send(mensagem_alerta)
@@ -1033,8 +1148,8 @@ class MyBot(discord.Client):
             )
 
             # Título
-            elements.append(Paragraph(f"RELATÓRIO SEMANAL DE EMPRESAS SUSPENSAS", title_style))
-            elements.append(Paragraph(f"Semana: {semana}", styles['Normal']))
+            elements.append(Paragraph(f"RELATÓRIO SEMANAL - EMPRESAS ATUALMENTE SUSPENSAS", title_style))
+            elements.append(Paragraph(f"Semana: {semana} | Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}", styles['Normal']))
             elements.append(Paragraph(f"CANELLA & SANTOS CONTABILIDADE EIRELI", styles['Normal']))
             elements.append(Spacer(1, 0.5*cm))
 
@@ -1067,20 +1182,19 @@ class MyBot(discord.Client):
             elements.append(Spacer(1, 0.5*cm))
 
             # Lista de empresas
-            elements.append(Paragraph("EMPRESAS SUSPENSAS", heading_style))
+            elements.append(Paragraph("EMPRESAS ATUALMENTE SUSPENSAS", heading_style))
             elements.append(Spacer(1, 0.3*cm))
 
-            # Tabela de empresas
-            data = [['Código', 'Nome da Empresa', 'Data/Hora da Suspensão']]
+            # Tabela de empresas (sem data/hora pois é listagem atual)
+            data = [['Código', 'Nome da Empresa']]
 
             for emp in empresas:
                 data.append([
                     emp['codigo'],
-                    emp['nome'][:40] + ('...' if len(emp['nome']) > 40 else ''),
-                    emp['data_hora']
+                    emp['nome'][:50] + ('...' if len(emp['nome']) > 50 else '')
                 ])
 
-            table = Table(data, colWidths=[3*cm, 9*cm, 5*cm])
+            table = Table(data, colWidths=[3*cm, 14*cm])
             table.setStyle(TableStyle([
                 ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#E91E63')),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
