@@ -309,7 +309,7 @@ async def email_monitor():
             embed.add_field(name="📝 Tipo de Mensagem", value=info['tipo_mensagem'], inline=False)
             embed.add_field(name="📌 Assunto da Notificação", value=info['assunto_notificacao'], inline=False)
 
-            await channel.send("@everyone", embed=embed)
+            await channel.send("@Legalização", embed=embed)
             logger.info(f">> Mensagem enviada com sucesso! | Cliente: {info['cliente']}")
             enviadas += 1
 
