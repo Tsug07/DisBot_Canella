@@ -18,6 +18,7 @@ Bot_*/config/*.json
 Bot_*/data/
 Bot_*/logs/
 Bot_*/backups/
+Bot_*/debug_output/
 
 # Arquivos de gerenciamento local (não versionar)
 Bot_*/bot_config.json
@@ -25,6 +26,8 @@ Bot_*/*.pid
 Bot_*/rebecca_bot.pid
 Bot_*/bot_rebecca.lock
 Bot_*/gerson_bot.pid
+Bot_*/bot_bip.lock
+bip_bot.pid
 
 # Arquivos de setup gerados localmente
 Bot_*/setup/*.log
