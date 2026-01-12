@@ -1,5 +1,5 @@
 {
-    "_instrucoes": "Mapeie o nome do responsável (coluna E da planilha) para o ID do Discord",
+    "_instrucoes": "Mapeie o nome do responsável (colunas D e E da planilha) para o ID do Discord",
     "_como_obter_id": "Ative o Modo Desenvolvedor no Discord, clique com botão direito no usuário e 'Copiar ID do Usuário'",
     "_exemplo": "O ID é um número como 123456789012345678",
 
@@ -10,8 +10,14 @@
         "RODRIGO":"1379416976744648704",
         "THAIS":"1285694387598397571",
         "VANESSA":"1359143512926458092",
-        "HUGO":"1459178925445173386"
+        "HUGO":"1459178925445173386",
+        "Camila":"1434917406819618843",
+        "Maria Alice":"1295358313403383829",
+        "Bruna":"1304480809708814339",
+        "Carol":"1389654350904950856",
+        "Lais/Eli":"1314633355727339592",
+        "Fabiana":"1285344147292684359"
     },
 
-    "_nota": "Se o responsável não estiver mapeado, o bot usará o fallback configurado"
+    "_nota": "Se o responsável não estiver mapeado, o bot usará Fabiana e Lais/Eli como fallback"
 }

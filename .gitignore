@@ -14,6 +14,7 @@ Bot_*/config/.env
 Bot_*/config/*.json
 !Bot_*/config/.env.example
 
+nul
 # Dados e estado de cada bot
 Bot_*/data/
 Bot_*/logs/

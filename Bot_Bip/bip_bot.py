@@ -43,13 +43,14 @@ RESPONSAVEIS_JSON_PATH = BOT_DIR / "responsaveis_discord.json"
 # ID do cargo para mencionar (template - ajustar conforme necessário)
 CARGO_ROLE_ID = "0000000000000000000"
 
-# ID do responsável geral (fallback quando não encontra responsável)
-RESPONSAVEL_FALLBACK_ID = "0000000000000000000"
+# IDs de fallback (quando não encontra responsável na planilha)
+FABIANA_USER_ID = "1285344147292684359"
+LAIS_ELI_USER_ID = "1314633355727339592"  # Lais/Eli
 
 # ID do Hugo (para receber relatório de empresas sem responsável)
 HUGO_USER_ID = "1285316758009544844"
 
-# Cache dos dados da planilha (empresa -> {responsavel, situacao})
+# Cache dos dados da planilha (empresa -> {responsavel_dp, responsavel, situacao})
 empresa_responsavel_cache = {}
 # Cache do mapeamento (responsável -> discord_id)
 responsavel_discord_cache = {}
@@ -128,7 +129,7 @@ def carregar_mapeamento_discord():
 
 
 def carregar_planilha_empresas():
-    """Baixa a planilha do Google Sheets e extrai empresa -> {responsavel, situacao}."""
+    """Baixa a planilha do Google Sheets e extrai empresa -> {responsavel_dp, responsavel, situacao}."""
     global empresa_responsavel_cache
     try:
         logger.info("Baixando planilha do Google Sheets...")
@@ -147,10 +148,12 @@ def carregar_planilha_empresas():
 
             # Coluna B (índice 1) = Nome da empresa
             # Coluna C (índice 2) = Situação da empresa
+            # Coluna D (índice 3) = Responsável DP
             # Coluna E (índice 4) = Responsável
             if len(row) >= 5:
                 empresa = row[1].strip().upper() if row[1] else ""
                 situacao = row[2].strip().upper() if len(row) > 2 and row[2] else ""
+                responsavel_dp = row[3].strip() if len(row) > 3 and row[3] else ""
                 responsavel = row[4].strip() if row[4] else ""
 
                 # Ignora filiais (variações: FILIAL, FIL., FILIAL 1, etc.)
@@ -160,7 +163,8 @@ def carregar_planilha_empresas():
                 # Carrega todas as empresas (mesmo sem responsável) para verificar status
                 if empresa:
                     empresa_responsavel_cache[empresa] = {
-                        'responsavel': responsavel,  # Pode ser vazio
+                        'responsavel_dp': responsavel_dp,  # Responsável DP (coluna D)
+                        'responsavel': responsavel,  # Responsável (coluna E)
                         'situacao': situacao
                     }
 
@@ -215,16 +219,17 @@ def verificar_situacao_empresa(nome_cliente: str, threshold: float = 0.80) -> tu
     return True, situacao
 
 
-def buscar_responsavel_empresa(nome_cliente: str, threshold: float = 0.80) -> str | None:
+def buscar_responsaveis_empresa(nome_cliente: str, threshold: float = 0.80) -> list[str]:
     """
-    Busca o responsável de uma empresa pelo nome.
+    Busca os responsáveis (DP e geral) de uma empresa pelo nome.
     Usa busca por similaridade se não encontrar match exato.
 
     Args:
         nome_cliente: Nome do cliente do email
         threshold: Similaridade mínima para considerar match (padrão 80%)
 
-    Retorna o ID do Discord do responsável ou None se não encontrar.
+    Retorna lista de IDs do Discord dos responsáveis encontrados.
+    Lista vazia se empresa não encontrada ou sem responsáveis mapeados.
     """
     # Normaliza o nome para busca
     nome_normalizado = nome_cliente.strip().upper()
@@ -248,20 +253,38 @@ def buscar_responsavel_empresa(nome_cliente: str, threshold: float = 0.80) -> st
             logger.info(f"Match por similaridade ({melhor_score:.0%}): '{nome_cliente}' -> '{melhor_match}'")
         else:
             logger.debug(f"Empresa não encontrada na planilha: {nome_cliente}")
-            return None
+            return []
 
-    # Extrai responsável dos dados da empresa
+    # Extrai ambos os responsáveis dos dados da empresa
+    responsavel_dp = dados_empresa.get('responsavel_dp', '')
     responsavel = dados_empresa.get('responsavel', '')
 
-    # Busca o ID do Discord do responsável
-    discord_id = responsavel_discord_cache.get(responsavel)
+    discord_ids = []
 
-    if not discord_id:
-        logger.debug(f"Responsável '{responsavel}' não tem ID Discord mapeado")
-        return None
+    # Busca o ID do Discord do responsável DP (coluna D)
+    if responsavel_dp:
+        discord_id_dp = responsavel_discord_cache.get(responsavel_dp)
+        if discord_id_dp:
+            discord_ids.append(discord_id_dp)
+            logger.debug(f"Responsável DP '{responsavel_dp}' -> Discord ID '{discord_id_dp}'")
+        else:
+            logger.debug(f"Responsável DP '{responsavel_dp}' não tem ID Discord mapeado")
 
-    logger.debug(f"Empresa '{nome_cliente}' -> Responsável '{responsavel}' -> Discord ID '{discord_id}'")
-    return discord_id
+    # Busca o ID do Discord do responsável geral (coluna E)
+    if responsavel:
+        discord_id = responsavel_discord_cache.get(responsavel)
+        if discord_id and discord_id not in discord_ids:  # Evita duplicatas
+            discord_ids.append(discord_id)
+            logger.debug(f"Responsável '{responsavel}' -> Discord ID '{discord_id}'")
+        else:
+            logger.debug(f"Responsável '{responsavel}' não tem ID Discord mapeado")
+
+    if discord_ids:
+        logger.debug(f"Empresa '{nome_cliente}' -> {len(discord_ids)} responsável(is) encontrado(s)")
+    else:
+        logger.debug(f"Empresa '{nome_cliente}' -> Nenhum responsável com ID Discord mapeado")
+
+    return discord_ids
 
 
 def atualizar_caches():
@@ -481,7 +504,7 @@ def check_emails():
 # ------------------------------------------
 # TAREFA AUTOMÁTICA DE CHECAR GMAIL
 # ------------------------------------------
-@tasks.loop(seconds=60)
+@tasks.loop(seconds=150)  # 2.5 minutos
 async def email_monitor():
     try:
         channel = bot.get_channel(CHANNEL_ID_BIP)
@@ -525,16 +548,18 @@ async def email_monitor():
                 empresas_ignoradas.append((empresa, situacao))
                 continue
 
-            # Busca o responsável pela empresa
-            discord_id = buscar_responsavel_empresa(empresa)
+            # Busca os responsáveis pela empresa (DP e geral)
+            discord_ids = buscar_responsaveis_empresa(empresa)
 
-            # FASE DE TESTE: Se encontrar na planilha -> marca Hugo, senão -> @everyone
-            if discord_id:
-                mencao = f"<@{HUGO_USER_ID}>"
-                logger.info(f">> Empresa encontrada na planilha -> mencionando Hugo (teste)")
+            # Monta a menção baseado nos responsáveis encontrados
+            if discord_ids:
+                # Encontrou pelo menos um responsável - menciona todos
+                mencao = " ".join([f"<@{uid}>" for uid in discord_ids])
+                logger.info(f">> Empresa '{empresa}' -> {len(discord_ids)} responsável(is) encontrado(s)")
             else:
-                mencao = "@everyone"
-                logger.info(f">> Empresa não encontrada na planilha -> mencionando @everyone (teste)")
+                # Nenhum responsável encontrado - fallback para Fabiana e Lais/Eli
+                mencao = f"<@{FABIANA_USER_ID}> <@{LAIS_ELI_USER_ID}>"
+                logger.info(f">> Empresa '{empresa}' sem responsável -> mencionando Fabiana e Lais/Eli")
                 empresas_sem_responsavel.append(empresa)
 
             # Divide notificações em lotes de 5 para não exceder limite do embed

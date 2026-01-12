@@ -5,7 +5,10 @@
       "Bash(python:*)",
       "Bash(git checkout:*)",
       "Bash(move:*)",
-      "Bash(dir:*)"
+      "Bash(dir:*)",
+      "Bash(tasklist /FI \"IMAGENAME eq python.exe\" /V /FO CSV)",
+      "Bash(findstr:*)",
+      "Bash(wmic process where:*)"
     ],
     "deny": [],
     "ask": []
