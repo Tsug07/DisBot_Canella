@@ -47,6 +47,9 @@ CARGO_ROLE_ID = "0000000000000000000"
 FABIANA_USER_ID = "1285344147292684359"
 LAIS_ELI_USER_ID = "1314633355727339592"  # Lais/Eli
 
+# ID do cargo Legalização (para alertas de procuração)
+LEGALIZACAO_ROLE_ID = "1299045050881151006"
+
 # ID do Hugo (para receber relatório de empresas sem responsável)
 HUGO_USER_ID = "1285316758009544844"
 
@@ -342,39 +345,183 @@ def format_date_br(date_string):
 
 
 # ------------------------------------------
-# FUNÇÃO PARA EXTRAIR NOTIFICAÇÃO DO E-MAIL ECAC
+# FUNÇÃO PARA EXTRAIR ALERTA DE PROCURAÇÃO
 # ------------------------------------------
-def extract_ecac_notification(body, subject):
+def extract_procuracao_alert(body, subject):
     """
-    Extrai a notificação do corpo do e-mail HTML do ECAC.
-    Retorna um dicionário com os dados da notificação ou None se não encontrar.
+    Extrai alerta de empresas sem procuração do corpo do e-mail HTML.
+    Retorna um dicionário com os dados do alerta ou None se não for esse tipo de email.
 
-    Formato do email ECAC (Bip SERPRO):
-    - Assunto: "EMPRESA - Assunto da mensagem - DATA"
-    - HTML contém: Empresa, Assunto, Data de Envio, e corpo da mensagem
+    Formato do email de alerta:
+    - Assunto contém: "ALERTA: X Empresa(s) sem Procuração"
+    - HTML contém tabela com Nome da Empresa e CNPJ
     """
-
     try:
-        # Extrai empresa do HTML
+        # Verifica se é um email de alerta de procuração
+        if "sem Procuração" not in subject and "sem Procuração" not in body:
+            return None
+
+        # Extrai todas as empresas da tabela
+        empresas = []
+
+        # Padrão para encontrar linhas da tabela com empresa e CNPJ
+        # Busca por <strong>NOME</strong> seguido de CNPJ no formato XX.XXX.XXX/XXXX-XX
+        pattern = r'<strong>([^<]+)</strong>\s*</td>\s*<td[^>]*>\s*(\d{2}\.\d{3}\.\d{3}/\d{4}-\d{2})'
+        matches = re.findall(pattern, body, re.DOTALL)
+
+        for nome, cnpj in matches:
+            empresas.append({
+                'nome': nome.strip(),
+                'cnpj': cnpj.strip()
+            })
+
+        if not empresas:
+            logger.warning("Alerta de procuração detectado mas nenhuma empresa extraída")
+            return None
+
+        # Extrai a data do footer
+        data_match = re.search(r'Data:\s*(\d{2}/\d{2}/\d{4},?\s*\d{2}:\d{2}:\d{2})', body)
+        data_alerta = data_match.group(1) if data_match else datetime.now().strftime('%d/%m/%Y, %H:%M:%S')
+
+        alert = {
+            'tipo': 'procuracao',
+            'empresas': empresas,
+            'total': len(empresas),
+            'data': data_alerta
+        }
+
+        logger.info(f"Alerta de procuração extraído: {len(empresas)} empresa(s)")
+        return alert
+
+    except Exception as e:
+        logger.error(f"Erro ao extrair alerta de procuração: {e}")
+        return None
+
+
+# ------------------------------------------
+# FUNÇÃO PARA LIMPAR ENTIDADES HTML
+# ------------------------------------------
+def limpar_html(texto):
+    """Remove tags e entidades HTML de um texto."""
+    # Remove tags HTML
+    texto_limpo = re.sub(r'<[^>]+>', ' ', texto)
+    # Remove entidades HTML comuns
+    entidades = {
+        '&nbsp;': ' ', '&ccedil;': 'ç', '&Ccedil;': 'Ç',
+        '&atilde;': 'ã', '&Atilde;': 'Ã', '&aacute;': 'á', '&Aacute;': 'Á',
+        '&eacute;': 'é', '&Eacute;': 'É', '&iacute;': 'í', '&Iacute;': 'Í',
+        '&oacute;': 'ó', '&Oacute;': 'Ó', '&uacute;': 'ú', '&Uacute;': 'Ú',
+        '&otilde;': 'õ', '&Otilde;': 'Õ', '&ecirc;': 'ê', '&Ecirc;': 'Ê',
+        '&quot;': '"', '&ldquo;': '"', '&rdquo;': '"',
+        '&ndash;': '-', '&mdash;': '-', '&amp;': '&',
+    }
+    for entidade, char in entidades.items():
+        texto_limpo = texto_limpo.replace(entidade, char)
+    # Remove espaços extras
+    return ' '.join(texto_limpo.split())
+
+
+# ------------------------------------------
+# FUNÇÃO PARA EXTRAIR NOTIFICAÇÃO DO E-MAIL ECAC (FORMATO LISTA)
+# ------------------------------------------
+def extract_ecac_notification_lista(body, subject):
+    """
+    Extrai notificações do formato de lista (tabela com múltiplas mensagens).
+    Retorna lista de dicionários com os dados das notificações.
+
+    Formato: Email com tabela contendo Assunto e Data de Envio
+    - Empresa está no header do email
+    - Cada linha da tabela é uma mensagem
+    """
+    try:
+        notifications = []
+
+        # Extrai empresa do header (está dentro de um <p> após o <h1>)
+        empresa_match = re.search(
+            r'<h1[^>]*>.*?Mensagens Não Lidas.*?</h1>\s*<p[^>]*>([^<]+)</p>',
+            body,
+            re.DOTALL | re.IGNORECASE
+        )
+        if not empresa_match:
+            # Tenta extrair do assunto: "📬 EMPRESA: X Mensagem(ns)..."
+            empresa_match_subject = re.search(r'📬\s*([^:]+):\s*\d+\s*Mensagem', subject)
+            if empresa_match_subject:
+                empresa = empresa_match_subject.group(1).strip()
+            else:
+                return None
+        else:
+            empresa = empresa_match.group(1).strip()
+
+        # Extrai linhas da tabela (cada <tr> no tbody)
+        # Padrão: <td>Assunto</td> <td>Data</td>
+        rows = re.findall(
+            r'<tr>\s*<td[^>]*>\s*([^<]+)\s*</td>\s*<td[^>]*>\s*(\d{2}/\d{2}/\d{4})\s*</td>\s*</tr>',
+            body,
+            re.DOTALL
+        )
+
+        if not rows:
+            return None
+
+        for assunto, data_envio in rows:
+            notification = {
+                'empresa': empresa,
+                'assunto': assunto.strip(),
+                'data_envio': data_envio.strip(),
+                'resumo': ''  # Formato lista não tem resumo
+            }
+            notifications.append(notification)
+            logger.info(f"Notificação extraída (lista): {empresa} - {assunto.strip()}")
+
+        return notifications if notifications else None
+
+    except Exception as e:
+        logger.error(f"Erro ao extrair notificação ECAC (lista): {e}")
+        return None
+
+
+# ------------------------------------------
+# FUNÇÃO PARA EXTRAIR NOTIFICAÇÃO DO E-MAIL ECAC (FORMATO INDIVIDUAL)
+# ------------------------------------------
+def extract_ecac_notification_individual(body, subject):
+    """
+    Extrai notificação do formato individual (uma mensagem com detalhes).
+    Retorna dicionário com os dados da notificação ou None.
+
+    Formato: Email com info-label/info-value e message-body
+    """
+    try:
+        empresa = None
+        assunto = None
+        data_envio = None
+        resumo = ""
+
+        # Extrai empresa
         empresa_match = re.search(
             r'<span class="info-label">Empresa:</span>\s*<span class="info-value">([^<]+)</span>',
             body,
             re.DOTALL
         )
+        if empresa_match:
+            empresa = empresa_match.group(1).strip()
 
-        # Extrai assunto do HTML
+        # Extrai assunto
         assunto_match = re.search(
             r'<span class="info-label">Assunto:</span>\s*<span class="info-value">([^<]+)</span>',
             body,
             re.DOTALL
         )
+        if assunto_match:
+            assunto = assunto_match.group(1).strip()
 
-        # Extrai data de envio do HTML
+        # Extrai data de envio
         data_match = re.search(
             r'<span class="info-label">Data de Envio:</span>\s*<span class="info-value">([^<]+)</span>',
             body,
             re.DOTALL
         )
+        if data_match:
+            data_envio = data_match.group(1).strip()
 
         # Extrai corpo da mensagem
         corpo_match = re.search(
@@ -382,50 +529,53 @@ def extract_ecac_notification(body, subject):
             body,
             re.DOTALL
         )
+        if corpo_match:
+            corpo_html = corpo_match.group(1)
+            corpo_limpo = limpar_html(corpo_html)
+            resumo = corpo_limpo[:300] + "..." if len(corpo_limpo) > 300 else corpo_limpo
 
-        if empresa_match and assunto_match and data_match:
-            empresa = empresa_match.group(1).strip()
-            assunto = assunto_match.group(1).strip()
-            data_envio = data_match.group(1).strip()
-
-            # Extrai resumo do corpo (limpa HTML e pega primeiros 300 chars)
-            resumo = ""
-            if corpo_match:
-                corpo_html = corpo_match.group(1)
-                # Remove tags HTML
-                corpo_limpo = re.sub(r'<[^>]+>', ' ', corpo_html)
-                # Remove entidades HTML comuns
-                corpo_limpo = corpo_limpo.replace('&nbsp;', ' ')
-                corpo_limpo = corpo_limpo.replace('&ccedil;', 'ç')
-                corpo_limpo = corpo_limpo.replace('&atilde;', 'ã')
-                corpo_limpo = corpo_limpo.replace('&aacute;', 'á')
-                corpo_limpo = corpo_limpo.replace('&eacute;', 'é')
-                corpo_limpo = corpo_limpo.replace('&iacute;', 'í')
-                corpo_limpo = corpo_limpo.replace('&oacute;', 'ó')
-                corpo_limpo = corpo_limpo.replace('&uacute;', 'ú')
-                corpo_limpo = corpo_limpo.replace('&otilde;', 'õ')
-                corpo_limpo = corpo_limpo.replace('&ecirc;', 'ê')
-                corpo_limpo = corpo_limpo.replace('&quot;', '"')
-                # Remove espaços extras
-                corpo_limpo = ' '.join(corpo_limpo.split())
-                resumo = corpo_limpo[:300] + "..." if len(corpo_limpo) > 300 else corpo_limpo
-
+        if empresa and assunto and data_envio:
             notification = {
                 'empresa': empresa,
                 'assunto': assunto,
                 'data_envio': data_envio,
                 'resumo': resumo
             }
-
-            logger.info(f"Notificação extraída: {empresa} - {assunto}")
+            logger.info(f"Notificação extraída (individual): {empresa} - {assunto}")
             return notification
-        else:
-            logger.warning("Não foi possível extrair todos os campos do email ECAC")
-            return None
+
+        return None
 
     except Exception as e:
-        logger.error(f"Erro ao extrair notificação ECAC: {e}")
+        logger.error(f"Erro ao extrair notificação ECAC (individual): {e}")
         return None
+
+
+# ------------------------------------------
+# FUNÇÃO PRINCIPAL PARA EXTRAIR NOTIFICAÇÃO DO E-MAIL ECAC
+# ------------------------------------------
+def extract_ecac_notification(body, subject):
+    """
+    Extrai notificações do corpo do e-mail HTML do ECAC.
+    Retorna lista de dicionários com os dados das notificações ou None.
+
+    Suporta dois formatos:
+    - Formato lista (2026): tabela com múltiplas mensagens
+    - Formato individual: uma mensagem com info-label/info-value
+    """
+    # Primeiro tenta o formato de lista (novo)
+    if "Mensagens Não Lidas" in body or "Lista de Mensagens" in body:
+        result = extract_ecac_notification_lista(body, subject)
+        if result:
+            return result
+
+    # Tenta o formato individual (antigo)
+    result = extract_ecac_notification_individual(body, subject)
+    if result:
+        return [result]  # Retorna como lista para manter consistência
+
+    logger.warning("Não foi possível extrair notificação do email ECAC")
+    return None
 
 # ------------------------------------------
 # FUNÇÃO PARA LER OS E-MAILS DA PASTA ECAC
@@ -434,7 +584,7 @@ def check_emails():
     """
     Lê emails não lidos da pasta ECAC.
     Cada email do Bip SERPRO contém uma notificação individual.
-    Retorna lista de notificações extraídas.
+    Retorna tupla (notificações, alertas_procuração).
     """
     try:
         mail = imaplib.IMAP4_SSL("imap.gmail.com")
@@ -446,15 +596,16 @@ def check_emails():
         logger.info("Pasta 'ECAC' selecionada")
 
         # Busca apenas emails não lidos
-        result, data = mail.search(None, "UNSEEN")
+        _, data = mail.search(None, "UNSEEN")
         email_ids = data[0].split()
 
         logger.info(f"Total de e-mails não lidos na pasta ECAC: {len(email_ids)}")
 
         all_notifications = []
+        alertas_procuracao = []
 
         for idx, eid in enumerate(email_ids, 1):
-            res, msg = mail.fetch(eid, "(RFC822)")
+            _, msg = mail.fetch(eid, "(RFC822)")
             for response in msg:
                 if isinstance(response, tuple):
                     msg_email = email.message_from_bytes(response[1])
@@ -477,16 +628,24 @@ def check_emails():
                         body = msg_email.get_payload(decode=True).decode("utf-8", errors="ignore")
 
                     # Verifica se é um email do Bip SERPRO (formato esperado)
-                    if "Bip SERPRO" in sender or "info-label" in body:
+                    if "Bip SERPRO" in sender or "info-label" in body or "Mensagens Não Lidas" in body:
+                        # Primeiro verifica se é um alerta de procuração
+                        alerta = extract_procuracao_alert(body, subject)
+                        if alerta:
+                            logger.info(f">> Alerta de procuração encontrado! {alerta['total']} empresa(s)")
+                            alertas_procuracao.append(alerta)
+                            continue
+
                         logger.info(f">> Email Bip SERPRO encontrado! Processando...")
 
-                        # Extrai a notificação do email
-                        notif = extract_ecac_notification(body, subject)
+                        # Extrai as notificações do email (pode retornar lista)
+                        notifs = extract_ecac_notification(body, subject)
 
-                        if notif:
-                            logger.info(f"   -> Empresa: {notif['empresa']}")
-                            logger.info(f"   -> Assunto: {notif['assunto']}")
-                            all_notifications.append(notif)
+                        if notifs:
+                            for notif in notifs:
+                                logger.info(f"   -> Empresa: {notif['empresa']}")
+                                logger.info(f"   -> Assunto: {notif['assunto']}")
+                                all_notifications.append(notif)
                         else:
                             logger.warning(f">> E-mail não contém notificação no padrão esperado")
                     else:
@@ -494,11 +653,82 @@ def check_emails():
 
         mail.logout()
         logger.info(f"Total de notificações para enviar ao Discord: {len(all_notifications)}")
-        return all_notifications
+        logger.info(f"Total de alertas de procuração: {len(alertas_procuracao)}")
+        return all_notifications, alertas_procuracao
 
     except Exception as e:
         logger.error(f"Erro ao verificar e-mails: {str(e)}")
-        return []
+        return [], []
+
+
+# ------------------------------------------
+# FUNÇÃO PARA ENVIAR ALERTA DE PROCURAÇÃO
+# ------------------------------------------
+async def enviar_alerta_procuracao(channel, alerta):
+    """
+    Envia alerta de empresas sem procuração no Discord.
+    Menciona o cargo Legalização.
+    Divide em múltiplos embeds se houver mais de 20 empresas (limite Discord: 25 campos).
+    """
+    try:
+        # Menção ao cargo Legalização
+        mencao = f"<@&{LEGALIZACAO_ROLE_ID}>"
+
+        empresas = alerta['empresas']
+        total_empresas = alerta['total']
+
+        # Divide em lotes de 20 empresas (margem de segurança do limite de 25)
+        EMPRESAS_POR_EMBED = 20
+        total_lotes = (len(empresas) + EMPRESAS_POR_EMBED - 1) // EMPRESAS_POR_EMBED
+
+        for lote_idx in range(total_lotes):
+            inicio = lote_idx * EMPRESAS_POR_EMBED
+            fim = min(inicio + EMPRESAS_POR_EMBED, len(empresas))
+            empresas_lote = empresas[inicio:fim]
+
+            # Título e descrição variam conforme número de lotes
+            if total_lotes == 1:
+                titulo = "⚠️ ALERTA: Empresas sem Procuração"
+                descricao = f"Bip identificou **{total_empresas}** empresa(s) sem procuração autorizada no eCAC."
+            else:
+                titulo = f"⚠️ ALERTA: Empresas sem Procuração ({lote_idx + 1}/{total_lotes})"
+                descricao = f"Lote {lote_idx + 1} de {total_lotes} - Total: **{total_empresas}** empresa(s)"
+
+            embed = discord.Embed(
+                title=titulo,
+                description=descricao,
+                color=discord.Color.red(),
+            )
+
+            # Lista cada empresa do lote
+            for idx, empresa in enumerate(empresas_lote, inicio + 1):
+                nome = empresa['nome']
+                # Limita tamanho do nome (Discord limite: 256 para field name)
+                if len(nome) > 200:
+                    nome = nome[:200] + "..."
+
+                embed.add_field(
+                    name=f"{idx}. {nome}",
+                    value=f"📋 CNPJ: `{empresa['cnpj']}`",
+                    inline=False
+                )
+
+            # Adiciona data do alerta no último lote
+            if lote_idx == total_lotes - 1:
+                embed.set_footer(text=f"Data do alerta: {alerta['data']}")
+
+            # Só menciona no primeiro lote
+            if lote_idx == 0:
+                await channel.send(mencao, embed=embed)
+            else:
+                await channel.send(embed=embed)
+
+            logger.info(f">> Alerta de procuração lote {lote_idx + 1}/{total_lotes} enviado")
+
+        logger.info(f">> Alerta de procuração completo: {total_empresas} empresa(s)")
+
+    except Exception as e:
+        logger.error(f"Erro ao enviar alerta de procuração: {e}")
 
 
 # ------------------------------------------
@@ -512,9 +742,14 @@ async def email_monitor():
             logger.error(f"Canal Discord com ID {CHANNEL_ID_BIP} não encontrado")
             return
 
-        notifications = check_emails()
+        notifications, alertas_procuracao = check_emails()
 
         logger.info(f">> Total de notificacoes coletadas: {len(notifications)}")
+        logger.info(f">> Total de alertas de procuração: {len(alertas_procuracao)}")
+
+        # Processa alertas de procuração (menciona cargo Legalização)
+        for alerta in alertas_procuracao:
+            await enviar_alerta_procuracao(channel, alerta)
 
         if not notifications:
             return
