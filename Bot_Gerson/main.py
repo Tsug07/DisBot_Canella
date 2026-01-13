@@ -12,6 +12,7 @@ import shutil
 from pathlib import Path
 import sys
 import atexit
+import hashlib
 
 # === CONFIGURAÇÃO DE CAMINHOS ===
 # Define o diretório base do bot (onde está o main.py)
@@ -211,6 +212,59 @@ def marcar_primeiro_carregamento():
     except Exception as e:
         logger.error(f"Erro ao criar flag de primeiro carregamento: {e}")
 
+def calcular_hash_dados(dados: dict) -> str:
+    """
+    Calcula um hash MD5 dos dados da planilha para detectar regressões.
+    Usado para identificar quando a API do Google retorna dados antigos/cache.
+    """
+    # Ordena as chaves para garantir consistência
+    dados_ordenados = json.dumps(dados, sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(dados_ordenados.encode('utf-8')).hexdigest()
+
+def carregar_historico_hashes() -> dict:
+    """Carrega o histórico de hashes dos últimos estados salvos."""
+    caminho = DATA_DIR / "historico_hashes.json"
+    if caminho.exists():
+        try:
+            with open(caminho, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Erro ao carregar histórico de hashes: {e}")
+    return {"hashes": []}
+
+def salvar_historico_hashes(historico: dict):
+    """Salva o histórico de hashes."""
+    caminho = DATA_DIR / "historico_hashes.json"
+    try:
+        with open(caminho, "w", encoding="utf-8") as f:
+            json.dump(historico, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Erro ao salvar histórico de hashes: {e}")
+
+def verificar_regressao_dados(hash_atual: str, historico: dict) -> dict:
+    """
+    Verifica se o hash atual corresponde a um estado antigo (regressão).
+    Retorna informações sobre a regressão se detectada, None caso contrário.
+
+    A API do Google Sheets às vezes retorna dados em cache de dias anteriores,
+    especialmente fora do horário de expediente. Esta função detecta isso
+    comparando o hash dos dados atuais com hashes de estados anteriores.
+    """
+    hashes = historico.get("hashes", [])
+
+    # Ignora o hash mais recente (pode ser igual se não houve mudanças)
+    # Procura apenas em hashes mais antigos (índice 1 em diante)
+    for i, registro in enumerate(hashes[1:], start=1):
+        if registro.get("hash") == hash_atual:
+            return {
+                "detectada": True,
+                "data_original": registro.get("data"),
+                "posicao": i,
+                "idade_dias": i  # Aproximação baseada na posição no histórico
+            }
+
+    return {"detectada": False}
+
 # === BOT SETUP ===
 class MyBot(discord.Client):
     def __init__(self):
@@ -372,6 +426,55 @@ class MyBot(discord.Client):
                     await asyncio.sleep(150)  # 2.5 minutos
                     continue
 
+                # === FASE 1: Construir novos_dados SEM verificar alterações ===
+                # Primeiro precisamos construir o dicionário completo para verificar regressão
+                dados_preliminares = {}
+                for idx, row in enumerate(data[1:], start=2):
+                    if len(row) < 3:
+                        continue
+                    codigo = str(row[0]).strip()
+                    nome = str(row[1]).strip()
+                    status_bruto = str(row[2]).upper().strip()
+                    regime_bruto = str(row[3]).upper().strip() if len(row) > 3 else ""
+                    if not all([codigo, nome, status_bruto]):
+                        continue
+                    status = normalizar_status(status_bruto)
+                    regime = normalizar_regime(regime_bruto)
+                    # Proteção de regime vazio
+                    if codigo in self.sheet_data:
+                        dados_ant = self.sheet_data[codigo]
+                        regime_ant = dados_ant.get("regime_tributario", "") if isinstance(dados_ant, dict) else ""
+                        if regime_ant and not regime:
+                            regime = regime_ant
+                    dados_preliminares[codigo] = {"status": status, "regime_tributario": regime}
+
+                # === PROTEÇÕES PREVENTIVAS (antes de processar mudanças) ===
+                dados_anteriores_count = len(self.sheet_data)
+                dados_novos_count = len(dados_preliminares)
+
+                # Proteção 1: Dados incompletos
+                if dados_anteriores_count > 0 and dados_novos_count < dados_anteriores_count * 0.5:
+                    logger.warning(f"PROTEÇÃO: Dados novos ({dados_novos_count}) muito menores que anteriores ({dados_anteriores_count}). Ignorando ciclo.")
+                    print(f"PROTEÇÃO: Leitura incompleta ({dados_novos_count}/{dados_anteriores_count}). Ignorando.")
+                    await asyncio.sleep(150)
+                    continue
+
+                # Proteção 2: Regressão de dados (API retornou cache antigo)
+                hash_preliminar = calcular_hash_dados(dados_preliminares)
+                historico_hashes = carregar_historico_hashes()
+                regressao = verificar_regressao_dados(hash_preliminar, historico_hashes)
+
+                if regressao["detectada"]:
+                    logger.warning(f"REGRESSÃO: API retornou dados de {regressao['data_original']} (cache antigo)")
+                    print(f"PROTEÇÃO: Regressão detectada! Dados idênticos a {regressao['data_original']}")
+                    print(f"   Ignorando ciclo para evitar notificações falsas.")
+                    if self.mudancas_pendentes:
+                        logger.info(f"Limpando {len(self.mudancas_pendentes)} mudanças pendentes")
+                        self.mudancas_pendentes.clear()
+                    await asyncio.sleep(150)
+                    continue
+
+                # === FASE 2: Processar alterações (dados validados) ===
                 # Pula a primeira linha (cabeçalho)
                 for idx, row in enumerate(data[1:], start=2):  # start=2 porque idx 1 é o cabeçalho
                     # Verifica se a linha tem pelo menos as colunas essenciais (A, B, C)
@@ -578,19 +681,7 @@ class MyBot(discord.Client):
                         else:
                             logger.info(f"   Primeira carga: anotando {codigo} sem notificar Discord")
 
-                # FIM DO LOOP - PROTEÇÃO: Não salva se os dados novos forem muito menores que os anteriores
-                # (indica leitura incompleta/erro de conexão)
-                dados_anteriores_count = len(self.sheet_data)
-                dados_novos_count = len(novos_dados)
-
-                if dados_anteriores_count > 0 and dados_novos_count < dados_anteriores_count * 0.5:
-                    # Se os novos dados têm menos de 50% dos anteriores, provavelmente houve erro
-                    logger.warning(f"PROTEÇÃO ATIVADA: Dados novos ({dados_novos_count}) muito menores que anteriores ({dados_anteriores_count}). NÃO salvando estado.")
-                    print(f"⚠️ PROTEÇÃO: Leitura incompleta detectada ({dados_novos_count}/{dados_anteriores_count} registros). Estado NÃO será salvo.")
-                    # Não atualiza self.sheet_data nem salva
-                    await asyncio.sleep(150)
-                    continue
-
+                # FIM DO LOOP - Salva estado (proteções já foram verificadas no início)
                 self.sheet_data = novos_dados
                 await self.salvar_estado(novos_dados)
 
@@ -668,23 +759,42 @@ class MyBot(discord.Client):
         caminho = DATA_DIR / "estado_empresas.json"
 
         def _salvar():
+            agora = datetime.now()
             estado_completo = {
-                "ultima_verificacao": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                "ultima_verificacao": agora.strftime("%d/%m/%Y %H:%M:%S"),
                 "registros": dados
             }
             with open(caminho, "w", encoding="utf-8") as f:
                 json.dump(estado_completo, f, indent=4, ensure_ascii=False)
 
             # Backup automático
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            timestamp = agora.strftime("%Y%m%d_%H%M%S")
             backup_path = BACKUPS_DIR / f"estado_empresas_backup_{timestamp}.json"
             shutil.copy(caminho, backup_path)
-            return estado_completo, backup_path
+
+            # Atualiza histórico de hashes para detecção de regressão
+            hash_atual = calcular_hash_dados(dados)
+            historico = carregar_historico_hashes()
+            hashes = historico.get("hashes", [])
+
+            # Adiciona novo hash no início da lista (mais recente primeiro)
+            novo_registro = {
+                "hash": hash_atual,
+                "data": agora.strftime("%d/%m/%Y %H:%M:%S"),
+                "total_registros": len(dados)
+            }
+            hashes.insert(0, novo_registro)
+
+            # Mantém apenas os últimos 20 hashes (aproximadamente 1 semana de histórico)
+            historico["hashes"] = hashes[:20]
+            salvar_historico_hashes(historico)
+
+            return estado_completo, backup_path, hash_atual
 
         try:
-            estado_completo, backup_path = await asyncio.to_thread(_salvar)
+            estado_completo, backup_path, hash_atual = await asyncio.to_thread(_salvar)
             print(f"Estado salvo com sucesso em {estado_completo['ultima_verificacao']}")
-            logger.info(f"Estado salvo com sucesso. Backup: {backup_path}")
+            logger.info(f"Estado salvo com sucesso. Backup: {backup_path}. Hash: {hash_atual[:8]}...")
         except Exception as e:
             print(f"Erro ao salvar estado: {e}")
             logger.error(f"Erro ao salvar estado: {e}")
