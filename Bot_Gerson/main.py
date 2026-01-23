@@ -265,6 +265,76 @@ def verificar_regressao_dados(hash_atual: str, historico: dict) -> dict:
 
     return {"detectada": False}
 
+# === PERSISTÊNCIA DE MUDANÇAS PENDENTES ===
+MUDANCAS_PENDENTES_PATH = DATA_DIR / "mudancas_pendentes.json"
+EXPIRACAO_MUDANCAS_HORAS = 24  # Mudanças pendentes expiram após 24 horas
+
+def carregar_mudancas_pendentes() -> dict:
+    """
+    Carrega mudanças pendentes do disco.
+    Remove mudanças expiradas (mais de 24 horas).
+    """
+    if not MUDANCAS_PENDENTES_PATH.exists():
+        return {}
+
+    try:
+        with open(MUDANCAS_PENDENTES_PATH, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+
+        # Filtra mudanças expiradas
+        agora = datetime.now()
+        mudancas_validas = {}
+
+        for chave, mudanca in dados.items():
+            timestamp_str = mudanca.get("timestamp")
+            if timestamp_str:
+                try:
+                    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
+                    idade_horas = (agora - timestamp).total_seconds() / 3600
+
+                    if idade_horas <= EXPIRACAO_MUDANCAS_HORAS:
+                        mudancas_validas[chave] = mudanca
+                    else:
+                        logger.info(f"Mudança pendente expirada removida: {chave} (idade: {idade_horas:.1f}h)")
+                except ValueError:
+                    # Timestamp inválido, mantém a mudança por segurança
+                    mudancas_validas[chave] = mudanca
+            else:
+                # Sem timestamp (mudança antiga), remove
+                logger.info(f"Mudança pendente sem timestamp removida: {chave}")
+
+        if mudancas_validas:
+            logger.info(f"Mudanças pendentes carregadas do disco: {len(mudancas_validas)}")
+
+        return mudancas_validas
+
+    except Exception as e:
+        logger.error(f"Erro ao carregar mudanças pendentes: {e}")
+        return {}
+
+def salvar_mudancas_pendentes(mudancas: dict):
+    """Salva mudanças pendentes em disco de forma atômica."""
+    try:
+        # Salva em arquivo temporário primeiro (escrita atômica)
+        temp_path = MUDANCAS_PENDENTES_PATH.with_suffix(".tmp")
+
+        with open(temp_path, "w", encoding="utf-8") as f:
+            json.dump(mudancas, f, indent=4, ensure_ascii=False)
+
+        # Move o arquivo temporário para o destino final (operação atômica)
+        temp_path.replace(MUDANCAS_PENDENTES_PATH)
+
+        logger.debug(f"Mudanças pendentes salvas: {len(mudancas)}")
+
+    except Exception as e:
+        logger.error(f"Erro ao salvar mudanças pendentes: {e}")
+        # Tenta remover arquivo temporário se existir
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except:
+            pass
+
 # === BOT SETUP ===
 class MyBot(discord.Client):
     def __init__(self):
@@ -275,6 +345,7 @@ class MyBot(discord.Client):
         self.ultima_verificacao = None
         self.historico_alteracoes = {}  # Histórico de alterações por mês
         self.historico_suspensas = {}  # Histórico de empresas suspensas por semana
+        self.historico_reativadas = {}  # Histórico de empresas reativadas por semana
         self.ultimo_relatorio_enviado = None  # Data do último relatório enviado
         self.ultimo_relatorio_suspensas_enviado = None  # Data do último relatório semanal de suspensas
         self.primeiro_carregamento_completo = verificar_primeiro_carregamento()  # Flag de primeiro carregamento
@@ -304,6 +375,16 @@ class MyBot(discord.Client):
 
         # Carrega histórico de suspensas
         self.historico_suspensas = self.carregar_historico_suspensas()
+
+        # Carrega histórico de reativadas
+        self.historico_reativadas = self.carregar_historico_reativadas()
+
+        # Carrega mudanças pendentes do disco (sobrevive a reinícios)
+        self.mudancas_pendentes = carregar_mudancas_pendentes()
+        if self.mudancas_pendentes:
+            print(f"Mudanças pendentes recuperadas: {len(self.mudancas_pendentes)}")
+            for chave, dados in self.mudancas_pendentes.items():
+                print(f"   - {chave}: ciclo {dados.get('ciclos', 0)}/{self.CICLOS_CONFIRMACAO}")
 
         # Inicia tarefas em paralelo
         self.loop.create_task(self.monitorar_planilha())
@@ -471,6 +552,7 @@ class MyBot(discord.Client):
                     if self.mudancas_pendentes:
                         logger.info(f"Limpando {len(self.mudancas_pendentes)} mudanças pendentes")
                         self.mudancas_pendentes.clear()
+                        salvar_mudancas_pendentes(self.mudancas_pendentes)
                     await asyncio.sleep(150)
                     continue
 
@@ -542,6 +624,8 @@ class MyBot(discord.Client):
                                 pendente["ciclos"] += 1
                                 print(f"   Mudanca pendente confirmada (ciclo {pendente['ciclos']}/{self.CICLOS_CONFIRMACAO}): {codigo} - {nome}")
                                 logger.info(f"Mudança pendente confirmada (ciclo {pendente['ciclos']}/{self.CICLOS_CONFIRMACAO}): {codigo}")
+                                # Salva progresso do ciclo em disco
+                                salvar_mudancas_pendentes(self.mudancas_pendentes)
 
                                 # Se atingiu os ciclos necessários, confirma a mudança
                                 if pendente["ciclos"] >= self.CICLOS_CONFIRMACAO:
@@ -573,20 +657,23 @@ class MyBot(discord.Client):
                                         print(f"   Status nao requer notificacao: {status}")
                                         logger.info(f"Status não requer notificação: {status}")
 
-                                    # Remove da lista de pendentes
+                                    # Remove da lista de pendentes e salva em disco
                                     del self.mudancas_pendentes[chave_pendente]
+                                    salvar_mudancas_pendentes(self.mudancas_pendentes)
 
                             # Se o status voltou ao original, cancela a pendência
                             elif status == pendente["dados"]["status_anterior"]:
                                 print(f"   [X] Mudanca cancelada (voltou ao original): {codigo} - {nome}")
                                 logger.info(f"Mudança cancelada (voltou ao original): {codigo} - {nome}")
                                 del self.mudancas_pendentes[chave_pendente]
+                                salvar_mudancas_pendentes(self.mudancas_pendentes)
 
                             else:
                                 # Status mudou para um terceiro valor (instabilidade), reseta o contador
                                 print(f"   [!] Mudanca instavel detectada: {codigo} - status oscilando")
                                 logger.warning(f"Mudança instável: {codigo} - status oscilando ({pendente['dados']['status_novo']} -> {status})")
                                 del self.mudancas_pendentes[chave_pendente]
+                                salvar_mudancas_pendentes(self.mudancas_pendentes)
 
                         # Segundo: verifica se há nova mudança de status (apenas se não tem pendência)
                         elif status != status_anterior:
@@ -605,8 +692,11 @@ class MyBot(discord.Client):
                                     "status_anterior": status_anterior,
                                     "status_novo": status
                                 },
-                                "ciclos": 1
+                                "ciclos": 1,
+                                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                             }
+                            # Salva mudanças pendentes em disco imediatamente
+                            salvar_mudancas_pendentes(self.mudancas_pendentes)
                         
                         # Verifica mudança de regime tributário
                         regime_anterior_valido = regime_anterior if regime_anterior else ""
@@ -859,6 +949,36 @@ class MyBot(discord.Client):
             print(f"Erro ao salvar histórico de suspensas: {e}")
             logger.error(f"Erro ao salvar histórico de suspensas: {e}")
 
+    def carregar_historico_reativadas(self):
+        """Carrega o histórico de empresas reativadas por semana."""
+        caminho = DATA_DIR / "historico_reativadas.json"
+        if caminho.exists():
+            try:
+                with open(caminho, "r", encoding="utf-8") as f:
+                    historico = json.load(f)
+                    print(f"Histórico de reativadas carregado ({len(historico)} semanas).")
+                    logger.info(f"Histórico de reativadas carregado ({len(historico)} semanas).")
+                    return historico
+            except Exception as e:
+                print(f"Erro ao carregar histórico de reativadas: {e}")
+                logger.error(f"Erro ao carregar histórico de reativadas: {e}")
+        return {}
+
+    async def salvar_historico_reativadas(self):
+        """Salva o histórico de empresas reativadas de forma assíncrona."""
+        caminho = DATA_DIR / "historico_reativadas.json"
+
+        def _salvar():
+            with open(caminho, "w", encoding="utf-8") as f:
+                json.dump(self.historico_reativadas, f, indent=4, ensure_ascii=False)
+
+        try:
+            await asyncio.to_thread(_salvar)
+            logger.info("Histórico de reativadas salvo com sucesso.")
+        except Exception as e:
+            print(f"Erro ao salvar histórico de reativadas: {e}")
+            logger.error(f"Erro ao salvar histórico de reativadas: {e}")
+
     def _obter_semana_ano(self, data=None):
         """Retorna a chave da semana no formato YYYY-WNN (ex: 2025-W01)."""
         if data is None:
@@ -897,8 +1017,10 @@ class MyBot(discord.Client):
 
     def remover_empresa_suspensa(self, codigo):
         """Remove uma empresa do histórico de suspensas quando ela volta a ficar ATIVA.
-        Isso garante que o relatório semanal mostre apenas empresas que ESTÃO suspensas."""
+        Isso garante que o relatório semanal mostre apenas empresas que ESTÃO suspensas.
+        Também registra a empresa no histórico de reativadas para o relatório semanal."""
         empresa_removida = False
+        data_suspensao = None
 
         # Percorre todas as semanas do histórico
         for semana in list(self.historico_suspensas.keys()):
@@ -909,6 +1031,11 @@ class MyBot(discord.Client):
             for i, emp in enumerate(empresas):
                 if emp["codigo"] == codigo:
                     nome_empresa = emp["nome"]
+                    data_suspensao = emp.get("data_hora", "N/A")
+
+                    # Registra a reativação ANTES de remover
+                    self.registrar_empresa_reativada(codigo, nome_empresa, data_suspensao)
+
                     empresas.pop(i)
                     dados_semana["total"] = len(empresas)
                     empresa_removida = True
@@ -926,6 +1053,36 @@ class MyBot(discord.Client):
             asyncio.create_task(self.salvar_historico_suspensas())
 
         return empresa_removida
+
+    def registrar_empresa_reativada(self, codigo, nome, data_suspensao=None):
+        """Registra uma empresa reativada no histórico semanal."""
+        agora = datetime.now()
+        semana = self._obter_semana_ano(agora)
+
+        if semana not in self.historico_reativadas:
+            self.historico_reativadas[semana] = {
+                "empresas": [],
+                "total": 0
+            }
+
+        # Verifica se a empresa já foi registrada nesta semana
+        empresas_codigos = [e["codigo"] for e in self.historico_reativadas[semana]["empresas"]]
+        if codigo not in empresas_codigos:
+            self.historico_reativadas[semana]["empresas"].append({
+                "codigo": codigo,
+                "nome": nome,
+                "data_suspensao": data_suspensao,
+                "data_reativacao": agora.strftime("%d/%m/%Y %H:%M:%S")
+            })
+            self.historico_reativadas[semana]["total"] += 1
+
+            # Agenda o salvamento do histórico (não bloqueia)
+            asyncio.create_task(self.salvar_historico_reativadas())
+
+            logger.info(f"Empresa reativada registrada: {codigo} - {nome} (Semana: {semana})")
+            print(f"   Empresa {codigo} registrada como reativada (Semana: {semana})")
+        else:
+            logger.info(f"Empresa {codigo} já registrada como reativada nesta semana ({semana})")
 
     def registrar_alteracao(self, tipo, codigo, nome, valor_anterior, valor_novo):
         """Registra uma alteração no histórico mensal."""
@@ -1101,6 +1258,53 @@ class MyBot(discord.Client):
             )
             embed.set_footer(text="Canella & Santos • Comunicação Interna")
             await canal.send("@everyone", embed=embed)
+
+            # Mesmo sem suspensas, verifica se há reativadas para mostrar
+            semana_atual = self._obter_semana_ano()
+            reativadas = []
+
+            if semana_atual in self.historico_reativadas:
+                reativadas.extend(self.historico_reativadas[semana_atual]["empresas"])
+            if semana in self.historico_reativadas and semana != semana_atual:
+                reativadas.extend(self.historico_reativadas[semana]["empresas"])
+
+            if reativadas:
+                reativadas.sort(key=lambda x: extrair_numero(x["codigo"]))
+                total_reativadas = len(reativadas)
+
+                embed_reativadas = discord.Embed(
+                    title="✅ Empresas Reativadas Esta Semana",
+                    description=f"Empresas que **saíram do status SUSPENSA** e voltaram a ficar **ATIVAS**.",
+                    color=0x4CAF50
+                )
+
+                embed_reativadas.add_field(
+                    name="Total de Empresas Reativadas",
+                    value=f"**{total_reativadas}** empresa{'s' if total_reativadas > 1 else ''}",
+                    inline=False
+                )
+
+                reativadas_texto = []
+                for i, emp in enumerate(reativadas[:10]):
+                    data_susp = emp.get("data_suspensao", "N/A")
+                    if data_susp and data_susp != "N/A":
+                        data_susp_formatada = data_susp.split(" ")[0] if " " in data_susp else data_susp
+                        reativadas_texto.append(f"• **{emp['codigo']}** - {emp['nome']} _(suspensa desde {data_susp_formatada})_")
+                    else:
+                        reativadas_texto.append(f"• **{emp['codigo']}** - {emp['nome']}")
+
+                if len(reativadas) > 10:
+                    reativadas_texto.append(f"\n_... e mais {total_reativadas - 10} empresas_")
+
+                if reativadas_texto:
+                    texto_reativadas = "\n".join(reativadas_texto)
+                    if len(texto_reativadas) <= 1024:
+                        embed_reativadas.add_field(name="Empresas", value=texto_reativadas, inline=False)
+
+                embed_reativadas.set_footer(text=f"Canella & Santos • Semana: {semana}")
+                await canal.send(embed=embed_reativadas)
+                logger.info(f"Relatório de reativadas enviado: {total_reativadas} empresas")
+
             return
 
         # Cria o embed principal
@@ -1174,20 +1378,6 @@ class MyBot(discord.Client):
             inline=False
         )
 
-        # Calcula a data do próximo relatório (próxima segunda-feira às 08:30)
-        agora = datetime.now()
-        dias_ate_segunda = (7 - agora.weekday()) % 7
-        if dias_ate_segunda == 0:
-            dias_ate_segunda = 7  # Se hoje é segunda, próximo é semana que vem
-        proxima_segunda = agora + timedelta(days=dias_ate_segunda)
-        proximo_relatorio = proxima_segunda.strftime("%d/%m/%Y") + " às 08:30"
-
-        embed.add_field(
-            name="📅 Próximo Relatório",
-            value=f"**{proximo_relatorio}**",
-            inline=False
-        )
-
         embed.set_footer(text=f"Canella & Santos • Semana: {semana}")
 
         # Envia mensagem de alerta antes do embed
@@ -1200,6 +1390,76 @@ class MyBot(discord.Client):
         await canal.send(mensagem_alerta)
         await canal.send(embed=embed)
         logger.info(f"Relatório semanal de suspensas enviado: {semana}")
+
+        # === SEÇÃO DE EMPRESAS REATIVADAS ===
+        # Busca empresas reativadas na semana atual e anterior
+        semana_atual = self._obter_semana_ano()
+        reativadas = []
+
+        # Coleta reativadas da semana atual
+        if semana_atual in self.historico_reativadas:
+            reativadas.extend(self.historico_reativadas[semana_atual]["empresas"])
+
+        # Coleta reativadas da semana do relatório (semana anterior)
+        if semana in self.historico_reativadas and semana != semana_atual:
+            reativadas.extend(self.historico_reativadas[semana]["empresas"])
+
+        if reativadas:
+            # Ordena por código numérico
+            reativadas.sort(key=lambda x: extrair_numero(x["codigo"]))
+            total_reativadas = len(reativadas)
+
+            # Cria embed de reativadas
+            embed_reativadas = discord.Embed(
+                title="✅ Empresas Reativadas Esta Semana",
+                description=f"Empresas que **saíram do status SUSPENSA** e voltaram a ficar **ATIVAS**.",
+                color=0x4CAF50  # Verde - bom sinal
+            )
+
+            embed_reativadas.add_field(
+                name="Total de Empresas Reativadas",
+                value=f"**{total_reativadas}** empresa{'s' if total_reativadas > 1 else ''}",
+                inline=False
+            )
+
+            # Lista as empresas reativadas (limita a 10)
+            reativadas_texto = []
+            for i, emp in enumerate(reativadas):
+                if i >= 10:
+                    reativadas_texto.append(f"\n_... e mais {total_reativadas - 10} empresas_")
+                    break
+                data_susp = emp.get("data_suspensao", "N/A")
+                if data_susp and data_susp != "N/A":
+                    # Extrai apenas a data (sem hora) se disponível
+                    data_susp_formatada = data_susp.split(" ")[0] if " " in data_susp else data_susp
+                    reativadas_texto.append(f"• **{emp['codigo']}** - {emp['nome']} _(suspensa desde {data_susp_formatada})_")
+                else:
+                    reativadas_texto.append(f"• **{emp['codigo']}** - {emp['nome']}")
+
+            if reativadas_texto:
+                texto_reativadas = "\n".join(reativadas_texto)
+                if len(texto_reativadas) <= 1024:
+                    embed_reativadas.add_field(
+                        name="Empresas",
+                        value=texto_reativadas,
+                        inline=False
+                    )
+
+            embed_reativadas.set_footer(text=f"Canella & Santos • Semana: {semana}")
+
+            await canal.send(embed=embed_reativadas)
+            logger.info(f"Relatório de reativadas enviado: {total_reativadas} empresas")
+
+        # Calcula a data do próximo relatório (próxima segunda-feira às 08:30)
+        agora = datetime.now()
+        dias_ate_segunda = (7 - agora.weekday()) % 7
+        if dias_ate_segunda == 0:
+            dias_ate_segunda = 7  # Se hoje é segunda, próximo é semana que vem
+        proxima_segunda = agora + timedelta(days=dias_ate_segunda)
+        proximo_relatorio = proxima_segunda.strftime("%d/%m/%Y") + " às 08:30"
+
+        # Envia informação do próximo relatório
+        await canal.send(f"📅 **Próximo relatório:** {proximo_relatorio}")
 
         # Se houver muitas empresas, envia também um PDF detalhado
         if total > 10:

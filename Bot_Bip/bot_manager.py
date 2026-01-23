@@ -1,5 +1,5 @@
 import customtkinter as ctk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 import subprocess
 import os
 import sys
@@ -240,12 +240,23 @@ class BotManager(ctk.CTk):
                                         state="disabled")
         self.restart_btn.grid(row=0, column=2, padx=5)
 
+        # Frame para botões de logs
+        log_frame = ctk.CTkFrame(self, fg_color="transparent")
+        log_frame.pack(pady=10)
+
         # Botão Ver Logs
-        log_btn = ctk.CTkButton(self, text="Ver Logs",
+        log_btn = ctk.CTkButton(log_frame, text="Ver Logs",
                                command=self.show_logs,
-                               width=200, height=35,
+                               width=140, height=35,
                                fg_color="#3498db", hover_color="#2980b9")
-        log_btn.pack(pady=10)
+        log_btn.grid(row=0, column=0, padx=5)
+
+        # Botão Exportar Log
+        export_btn = ctk.CTkButton(log_frame, text="Exportar Log",
+                                   command=self.export_log,
+                                   width=140, height=35,
+                                   fg_color="#9b59b6", hover_color="#8e44ad")
+        export_btn.grid(row=0, column=1, padx=5)
 
         # Configurações
         config_frame = ctk.CTkFrame(self)
@@ -309,6 +320,40 @@ class BotManager(ctk.CTk):
         """Mostra janela de logs"""
         self.log_window.deiconify()
         self.log_window.lift()
+
+    def export_log(self):
+        """Exporta o arquivo de log do bot para um local escolhido pelo usuario"""
+        try:
+            # Caminho do arquivo de log do bot
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            log_file = os.path.join(script_dir, "logs", "bip_bot.log")
+
+            if not os.path.exists(log_file):
+                messagebox.showwarning("Aviso", "Arquivo de log nao encontrado.\nO bot precisa ter sido executado pelo menos uma vez.")
+                return
+
+            # Gera nome sugerido com data/hora
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            suggested_name = f"bip_bot_log_{timestamp}.log"
+
+            # Abre dialogo para escolher onde salvar
+            dest_path = filedialog.asksaveasfilename(
+                defaultextension=".log",
+                filetypes=[("Arquivo de Log", "*.log"), ("Arquivo de Texto", "*.txt"), ("Todos os arquivos", "*.*")],
+                initialfile=suggested_name,
+                title="Exportar Log do Bip Bot"
+            )
+
+            if dest_path:
+                # Copia o arquivo de log
+                import shutil
+                shutil.copy2(log_file, dest_path)
+                self.log(f"Log exportado para: {dest_path}")
+                messagebox.showinfo("Sucesso", f"Log exportado com sucesso!\n\n{dest_path}")
+
+        except Exception as e:
+            self.log(f"Erro ao exportar log: {str(e)}")
+            messagebox.showerror("Erro", f"Erro ao exportar log:\n{str(e)}")
 
     def check_detached_bot(self):
         """Verifica bot em segundo plano"""
