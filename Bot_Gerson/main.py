@@ -1461,12 +1461,14 @@ class MyBot(discord.Client):
         # Envia informação do próximo relatório
         await canal.send(f"📅 **Próximo relatório:** {proximo_relatorio}")
 
-        # Se houver muitas empresas, envia também um PDF detalhado
-        if total > 10:
-            await self.enviar_relatorio_suspensas_pdf(canal, semana, empresas)
+        # Se houver muitas empresas suspensas ou reativadas, envia também um PDF detalhado
+        if total > 10 or len(reativadas) > 10:
+            await self.enviar_relatorio_suspensas_pdf(canal, semana, empresas, reativadas)
 
-    async def enviar_relatorio_suspensas_pdf(self, canal, semana, empresas):
-        """Gera e envia relatório de empresas suspensas em PDF."""
+    async def enviar_relatorio_suspensas_pdf(self, canal, semana, empresas, reativadas=None):
+        """Gera e envia relatório de empresas suspensas e reativadas em PDF."""
+        if reativadas is None:
+            reativadas = []
         try:
             from reportlab.lib import colors
             from reportlab.lib.pagesizes import A4
@@ -1518,7 +1520,8 @@ class MyBot(discord.Client):
             )
 
             # Título
-            elements.append(Paragraph(f"RELATÓRIO SEMANAL - EMPRESAS ATUALMENTE SUSPENSAS", title_style))
+            titulo_pdf = "RELATÓRIO SEMANAL - EMPRESAS SUSPENSAS E REATIVADAS" if reativadas else "RELATÓRIO SEMANAL - EMPRESAS ATUALMENTE SUSPENSAS"
+            elements.append(Paragraph(titulo_pdf, title_style))
             elements.append(Paragraph(f"Semana: {semana} | Gerado em: {datetime.now().strftime('%d/%m/%Y às %H:%M')}", styles['Normal']))
             elements.append(Paragraph(f"CANELLA & SANTOS CONTABILIDADE EIRELI", styles['Normal']))
             elements.append(Spacer(1, 0.5*cm))
@@ -1537,6 +1540,7 @@ class MyBot(discord.Client):
             elements.append(Paragraph("RESUMO", heading_style))
             stats_data = [
                 ['Total de Empresas Suspensas', str(len(empresas))],
+                ['Total de Empresas Reativadas', str(len(reativadas))],
             ]
             stats_table = Table(stats_data, colWidths=[12*cm, 5*cm])
             stats_table.setStyle(TableStyle([
@@ -1579,6 +1583,75 @@ class MyBot(discord.Client):
             ]))
             elements.append(table)
             elements.append(Spacer(1, 0.5*cm))
+
+            # === SEÇÃO DE EMPRESAS REATIVADAS NO PDF ===
+            if reativadas:
+                elements.append(Spacer(1, 0.5*cm))
+
+                # Estilo verde para reativadas
+                reativadas_heading_style = ParagraphStyle(
+                    'ReativadasHeading',
+                    parent=styles['Heading2'],
+                    fontSize=12,
+                    textColor=colors.HexColor('#2E7D32'),
+                    spaceAfter=12,
+                )
+
+                elements.append(Paragraph("EMPRESAS REATIVADAS ESTA SEMANA", reativadas_heading_style))
+                elements.append(Paragraph(
+                    "Empresas que saíram do status SUSPENSA e voltaram a ficar ATIVAS.",
+                    styles['Normal']
+                ))
+                elements.append(Spacer(1, 0.3*cm))
+
+                # Estatística de reativadas
+                stats_reativadas = [
+                    ['Total de Empresas Reativadas', str(len(reativadas))],
+                ]
+                stats_reativadas_table = Table(stats_reativadas, colWidths=[12*cm, 5*cm])
+                stats_reativadas_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#E8F5E9')),
+                    ('TEXTCOLOR', (0, 0), (-1, -1), colors.black),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 12),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.HexColor('#4CAF50'))
+                ]))
+                elements.append(stats_reativadas_table)
+                elements.append(Spacer(1, 0.3*cm))
+
+                # Tabela de empresas reativadas
+                data_reativadas = [['Código', 'Nome da Empresa', 'Suspensa desde']]
+
+                for emp in reativadas:
+                    data_susp = emp.get("data_suspensao", "N/A")
+                    if data_susp and data_susp != "N/A":
+                        data_susp_formatada = data_susp.split(" ")[0] if " " in data_susp else data_susp
+                    else:
+                        data_susp_formatada = "N/A"
+
+                    data_reativadas.append([
+                        emp['codigo'],
+                        emp['nome'][:40] + ('...' if len(emp['nome']) > 40 else ''),
+                        data_susp_formatada
+                    ])
+
+                table_reativadas = Table(data_reativadas, colWidths=[3*cm, 11*cm, 3*cm])
+                table_reativadas.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#4CAF50')),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, 0), 9),
+                    ('FONTSIZE', (0, 1), (-1, -1), 8),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#E8F5E9')),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.HexColor('#E8F5E9'), colors.HexColor('#C8E6C9')])
+                ]))
+                elements.append(table_reativadas)
+                elements.append(Spacer(1, 0.5*cm))
 
             # Rodapé
             elements.append(Paragraph(
