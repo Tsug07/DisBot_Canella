@@ -379,6 +379,9 @@ class MyBot(discord.Client):
         # Carrega histórico de reativadas
         self.historico_reativadas = self.carregar_historico_reativadas()
 
+        # Carrega datas dos últimos relatórios enviados (sobrevive a reinícios)
+        self.carregar_datas_relatorios()
+
         # Carrega mudanças pendentes do disco (sobrevive a reinícios)
         self.mudancas_pendentes = carregar_mudancas_pendentes()
         if self.mudancas_pendentes:
@@ -979,6 +982,51 @@ class MyBot(discord.Client):
             print(f"Erro ao salvar histórico de reativadas: {e}")
             logger.error(f"Erro ao salvar histórico de reativadas: {e}")
 
+    def carregar_datas_relatorios(self):
+        """Carrega as datas dos últimos relatórios enviados (sobrevive a reinícios)."""
+        caminho = DATA_DIR / "datas_relatorios.json"
+        if caminho.exists():
+            try:
+                with open(caminho, "r", encoding="utf-8") as f:
+                    dados = json.load(f)
+
+                if dados.get("ultimo_relatorio_suspensas"):
+                    self.ultimo_relatorio_suspensas_enviado = datetime.strptime(
+                        dados["ultimo_relatorio_suspensas"], "%Y-%m-%d"
+                    ).date()
+                    print(f"Último relatório semanal de suspensas: {self.ultimo_relatorio_suspensas_enviado}")
+
+                if dados.get("ultimo_relatorio_mensal"):
+                    self.ultimo_relatorio_enviado = datetime.strptime(
+                        dados["ultimo_relatorio_mensal"], "%Y-%m-%d"
+                    ).date()
+                    print(f"Último relatório mensal: {self.ultimo_relatorio_enviado}")
+
+                logger.info(f"Datas de relatórios carregadas: suspensas={self.ultimo_relatorio_suspensas_enviado}, mensal={self.ultimo_relatorio_enviado}")
+            except Exception as e:
+                print(f"Erro ao carregar datas de relatórios: {e}")
+                logger.error(f"Erro ao carregar datas de relatórios: {e}")
+
+    async def salvar_datas_relatorios(self):
+        """Salva as datas dos últimos relatórios enviados de forma assíncrona."""
+        caminho = DATA_DIR / "datas_relatorios.json"
+        dados = {}
+        if self.ultimo_relatorio_suspensas_enviado:
+            dados["ultimo_relatorio_suspensas"] = self.ultimo_relatorio_suspensas_enviado.strftime("%Y-%m-%d")
+        if self.ultimo_relatorio_enviado:
+            dados["ultimo_relatorio_mensal"] = self.ultimo_relatorio_enviado.strftime("%Y-%m-%d")
+
+        def _salvar():
+            with open(caminho, "w", encoding="utf-8") as f:
+                json.dump(dados, f, indent=4, ensure_ascii=False)
+
+        try:
+            await asyncio.to_thread(_salvar)
+            logger.info("Datas de relatórios salvas com sucesso.")
+        except Exception as e:
+            print(f"Erro ao salvar datas de relatórios: {e}")
+            logger.error(f"Erro ao salvar datas de relatórios: {e}")
+
     def _obter_semana_ano(self, data=None):
         """Retorna a chave da semana no formato YYYY-WNN (ex: 2025-W01)."""
         if data is None:
@@ -1122,7 +1170,8 @@ class MyBot(discord.Client):
         logger.info(f"Alteração registrada: {tipo} - {codigo} - {nome} (Competência: {competencia})")
 
     async def verificar_relatorio_mensal(self):
-        """Verifica diariamente se deve enviar o relatório mensal."""
+        """Verifica diariamente se deve enviar o relatório mensal.
+        Se o bot estava offline durante o horário programado, envia o relatório atrasado ao voltar."""
         await self.wait_until_ready()
         print(f"Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL}, Horário: 09:00)")
         logger.info(f"Sistema de relatório mensal iniciado (Dia configurado: {DIA_RELATORIO_MENSAL}, Horário: 09:00)")
@@ -1131,10 +1180,34 @@ class MyBot(discord.Client):
             try:
                 agora = datetime.now()
 
-                # Verifica se é o dia de enviar o relatório
-                if agora.day == DIA_RELATORIO_MENSAL:
-                    # Verifica se ainda não enviou hoje e se já são 9 horas da manhã
-                    if self.ultimo_relatorio_enviado != agora.date() and agora.hour == 9:
+                # Calcula a data programada para o relatório deste mês
+                dia_relatorio_este_mes = agora.replace(day=min(DIA_RELATORIO_MENSAL, 28))
+
+                # Verifica se já passou o dia do relatório deste mês
+                ja_passou_dia = agora.date() >= dia_relatorio_este_mes.date()
+
+                # Verifica se já enviou o relatório neste mês (no dia programado ou depois)
+                ja_enviou_este_mes = (
+                    self.ultimo_relatorio_enviado is not None
+                    and self.ultimo_relatorio_enviado.month == agora.month
+                    and self.ultimo_relatorio_enviado.year == agora.year
+                    and self.ultimo_relatorio_enviado >= dia_relatorio_este_mes.date()
+                )
+
+                if ja_passou_dia and not ja_enviou_este_mes:
+                    # É o dia programado: espera até 09:00 para enviar no horário ideal
+                    if agora.day == DIA_RELATORIO_MENSAL:
+                        if agora.hour >= 9:
+                            deve_enviar = True
+                        else:
+                            deve_enviar = False  # Ainda não chegou o horário
+                    else:
+                        # Já passou o dia: o bot perdeu o horário, envia atrasado
+                        deve_enviar = True
+                        print(f"Relatório mensal atrasado detectado! Dia programado: {DIA_RELATORIO_MENSAL}, hoje: {agora.day}")
+                        logger.warning(f"Relatório mensal atrasado. Dia programado: {DIA_RELATORIO_MENSAL}, último envio: {self.ultimo_relatorio_enviado}")
+
+                    if deve_enviar:
                         print(f"\n{'='*60}")
                         print(f"Gerando relatório mensal automático...")
                         print(f"{'='*60}")
@@ -1146,6 +1219,7 @@ class MyBot(discord.Client):
 
                         await self.enviar_relatorio_mensal(competencia)
                         self.ultimo_relatorio_enviado = agora.date()
+                        await self.salvar_datas_relatorios()
 
                         print(f"{'='*60}")
                         print(f"Relatório mensal enviado com sucesso!")
@@ -1161,7 +1235,8 @@ class MyBot(discord.Client):
             await asyncio.sleep(1800)
 
     async def verificar_relatorio_semanal_suspensas(self):
-        """Verifica se deve enviar o relatório semanal de empresas suspensas (toda segunda-feira às 08:30)."""
+        """Verifica se deve enviar o relatório semanal de empresas suspensas (toda segunda-feira às 08:30).
+        Se o bot estava offline durante o horário programado, envia o relatório atrasado ao voltar."""
         await self.wait_until_ready()
         print("Sistema de relatório semanal de suspensas iniciado (Segunda-feira às 08:30)")
         logger.info("Sistema de relatório semanal de suspensas iniciado (Segunda-feira às 08:30)")
@@ -1170,27 +1245,48 @@ class MyBot(discord.Client):
             try:
                 agora = datetime.now()
 
-                # Verifica se é segunda-feira (weekday() == 0)
-                if agora.weekday() == 0:
-                    # Verifica se ainda não enviou hoje e se já são 8:30
-                    if self.ultimo_relatorio_suspensas_enviado != agora.date():
-                        if agora.hour == 8 and agora.minute >= 30:
-                            print(f"\n{'='*60}")
-                            print(f"Gerando relatório semanal de empresas suspensas...")
-                            print(f"{'='*60}")
-                            logger.info("Gerando relatório semanal de empresas suspensas...")
+                # Calcula a última segunda-feira (ou hoje se for segunda)
+                dias_desde_segunda = agora.weekday()  # 0=segunda, 1=terça, ...
+                ultima_segunda = agora.date() - timedelta(days=dias_desde_segunda)
 
-                            # Envia relatório da semana anterior
-                            semana_anterior = self._obter_semana_ano(agora - timedelta(days=7))
+                # Verifica se o relatório desta semana já foi enviado
+                # (na segunda-feira atual ou depois dela)
+                ja_enviou_esta_semana = (
+                    self.ultimo_relatorio_suspensas_enviado is not None
+                    and self.ultimo_relatorio_suspensas_enviado >= ultima_segunda
+                )
 
-                            await self.enviar_relatorio_semanal_suspensas(semana_anterior)
-                            self.ultimo_relatorio_suspensas_enviado = agora.date()
+                if not ja_enviou_esta_semana:
+                    # É segunda-feira: espera até 08:30 para enviar no horário ideal
+                    if agora.weekday() == 0:
+                        if agora.hour > 8 or (agora.hour == 8 and agora.minute >= 30):
+                            deve_enviar = True
+                        else:
+                            deve_enviar = False  # Ainda não chegou o horário
+                    else:
+                        # Não é segunda: o bot perdeu o horário, envia atrasado
+                        deve_enviar = True
+                        print(f"Relatório semanal de suspensas atrasado detectado! Última segunda: {ultima_segunda}")
+                        logger.warning(f"Relatório semanal de suspensas atrasado. Última segunda: {ultima_segunda}, último envio: {self.ultimo_relatorio_suspensas_enviado}")
 
-                            print(f"{'='*60}")
-                            print(f"Relatório semanal de suspensas enviado com sucesso!")
-                            print(f"Semana: {semana_anterior}")
-                            print(f"{'='*60}\n")
-                            logger.info(f"Relatório semanal de suspensas enviado! Semana: {semana_anterior}")
+                    if deve_enviar:
+                        print(f"\n{'='*60}")
+                        print(f"Gerando relatório semanal de empresas suspensas...")
+                        print(f"{'='*60}")
+                        logger.info("Gerando relatório semanal de empresas suspensas...")
+
+                        # Envia relatório da semana anterior
+                        semana_anterior = self._obter_semana_ano(agora - timedelta(days=7))
+
+                        await self.enviar_relatorio_semanal_suspensas(semana_anterior)
+                        self.ultimo_relatorio_suspensas_enviado = agora.date()
+                        await self.salvar_datas_relatorios()
+
+                        print(f"{'='*60}")
+                        print(f"Relatório semanal de suspensas enviado com sucesso!")
+                        print(f"Semana: {semana_anterior}")
+                        print(f"{'='*60}\n")
+                        logger.info(f"Relatório semanal de suspensas enviado! Semana: {semana_anterior}")
 
             except Exception as e:
                 print(f"Erro ao verificar relatório semanal de suspensas: {e}")

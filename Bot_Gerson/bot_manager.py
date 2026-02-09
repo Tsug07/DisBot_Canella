@@ -85,46 +85,73 @@ class BotManager(ctk.CTk):
         self.after(2000, self.show_tray_notification)
 
     def cleanup_orphan_processes(self):
-        """Limpa processos orfaos do bot que ficaram rodando apos desligamento inesperado"""
+        """Limpa processos orfaos do bot que ficaram rodando apos desligamento inesperado.
+        Diferente do check_detached_bot, esta funcao mata processos que ficaram rodando
+        sem controle do manager (ex: manager fechou abruptamente)."""
         try:
             import psutil
 
-            # Nome do processo do bot (main.py rodando via python)
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            main_path = os.path.join(script_dir, "main.py")
-
             killed_count = 0
 
-            # Procura por processos Python rodando o main.py do bot
+            # Procura por processos Python rodando o gerson_bot.py do bot
             for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
                 try:
                     cmdline = proc.info.get('cmdline')
                     if cmdline and len(cmdline) >= 2:
-                        # Verifica se e um processo Python rodando nosso main.py
-                        if 'python' in cmdline[0].lower() and main_path.lower() in ' '.join(cmdline).lower():
-                            # Mata o processo orfao
+                        cmdline_str = ' '.join(cmdline).lower()
+                        # Verifica se e um processo Python rodando nosso gerson_bot.py
+                        if 'python' in cmdline[0].lower() and 'gerson_bot.py' in cmdline_str:
                             proc.kill()
                             killed_count += 1
                             self.log(f"Processo orfao eliminado (PID: {proc.info['pid']})")
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     pass
 
-            # Limpa o arquivo PID se existir
-            if os.path.exists(self.pid_file):
-                os.remove(self.pid_file)
-                self.log("Arquivo PID limpo")
-
             if killed_count > 0:
                 self.log(f"Total de {killed_count} processo(s) orfao(s) eliminado(s)")
+                # Limpa o arquivo PID pois os processos foram mortos
+                if os.path.exists(self.pid_file):
+                    os.remove(self.pid_file)
+                    self.log("Arquivo PID limpo")
             else:
                 self.log("Nenhum processo orfao encontrado")
+                # Se nao ha processo rodando mas o PID file existe, e um PID fantasma
+                if os.path.exists(self.pid_file):
+                    os.remove(self.pid_file)
+                    self.log("PID fantasma removido (processo nao existe mais)")
 
         except ImportError:
-            # Se psutil nao estiver instalado, faz limpeza basica apenas do arquivo PID
-            self.log("AVISO: psutil nao encontrado, fazendo limpeza basica")
+            # Sem psutil: valida o PID file manualmente
+            self.log("AVISO: psutil nao encontrado, validando PID file manualmente")
             if os.path.exists(self.pid_file):
-                os.remove(self.pid_file)
-                self.log("Arquivo PID limpo")
+                try:
+                    with open(self.pid_file, 'r') as f:
+                        pid = int(f.read().strip())
+                    # No Windows, tenta abrir o processo para verificar se existe
+                    if sys.platform == 'win32':
+                        import ctypes
+                        kernel = ctypes.windll.kernel32
+                        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+                        handle = kernel.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+                        if handle:
+                            kernel.CloseHandle(handle)
+                            # Processo existe, mas sem psutil nao da pra saber se e o bot
+                            self.log(f"PID {pid} existe mas nao foi possivel validar se e o bot (psutil ausente)")
+                        else:
+                            # Processo nao existe, PID fantasma
+                            os.remove(self.pid_file)
+                            self.log(f"PID fantasma removido ({pid} - processo nao existe)")
+                    else:
+                        try:
+                            os.kill(pid, 0)
+                            self.log(f"PID {pid} existe mas nao foi possivel validar (psutil ausente)")
+                        except OSError:
+                            os.remove(self.pid_file)
+                            self.log(f"PID fantasma removido ({pid})")
+                except (ValueError, FileNotFoundError):
+                    if os.path.exists(self.pid_file):
+                        os.remove(self.pid_file)
+                        self.log("Arquivo PID corrompido removido")
         except Exception as e:
             self.log(f"Erro ao limpar processos orfaos: {str(e)}")
 
@@ -352,6 +379,35 @@ class BotManager(ctk.CTk):
             self.log(f"Erro ao exportar log: {str(e)}")
             messagebox.showerror("Erro", f"Erro ao exportar log:\n{str(e)}")
 
+    def is_bot_process_alive(self, pid):
+        """Verifica se o PID corresponde a um processo do bot que ainda esta rodando.
+        Usa psutil para validar que o processo e realmente o gerson_bot.py,
+        evitando falsos positivos por PID reutilizado pelo sistema."""
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            # Verifica se o processo ainda esta rodando
+            if not proc.is_running() or proc.status() == psutil.STATUS_ZOMBIE:
+                return False
+            # Verifica se e realmente o nosso bot (e nao outro processo com PID reutilizado)
+            cmdline = proc.cmdline()
+            if cmdline and len(cmdline) >= 2:
+                cmdline_str = ' '.join(cmdline).lower()
+                if 'gerson_bot.py' in cmdline_str or 'gerson_bot' in cmdline_str:
+                    return True
+            # PID existe mas nao e o nosso bot
+            return False
+        except ImportError:
+            # Fallback sem psutil: tenta os.kill mas com aviso
+            try:
+                os.kill(pid, 0)
+                self.log("AVISO: psutil nao disponivel, nao foi possivel validar se o PID e do bot")
+                return True  # Assume que esta rodando (comportamento antigo)
+            except (OSError, PermissionError):
+                return False
+        except Exception:
+            return False
+
     def check_detached_bot(self):
         """Verifica bot em segundo plano"""
         if os.path.exists(self.pid_file):
@@ -359,8 +415,7 @@ class BotManager(ctk.CTk):
                 with open(self.pid_file, 'r') as f:
                     pid = int(f.read().strip())
 
-                try:
-                    os.kill(pid, 0)
+                if self.is_bot_process_alive(pid):
                     self.is_running = True
                     self.is_detached = True
                     self.update_status("Ligado (2 Plano)", "#27ae60")
@@ -371,11 +426,14 @@ class BotManager(ctk.CTk):
                     # Agenda auto-restart se estiver habilitado
                     if self.auto_restart_var.get():
                         self.schedule_auto_restart()
-                except (OSError, PermissionError):
+                else:
                     os.remove(self.pid_file)
-                    self.log("Arquivo PID invalido removido")
+                    self.log(f"PID fantasma detectado ({pid}) - arquivo PID removido, bot sera reiniciado")
             except:
-                pass
+                # Arquivo PID corrompido ou ilegivel
+                if os.path.exists(self.pid_file):
+                    os.remove(self.pid_file)
+                    self.log("Arquivo PID corrompido removido")
 
     def start_bot(self):
         """Inicia o bot"""
@@ -388,10 +446,10 @@ class BotManager(ctk.CTk):
 
             # Obtem o diretorio onde esta o bot_manager.py
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            main_path = os.path.join(script_dir, "main.py")
+            main_path = os.path.join(script_dir, "gerson_bot.py")
 
             if not os.path.exists(main_path):
-                self.log(f"ERRO: main.py nao encontrado em {main_path}")
+                self.log(f"ERRO: gerson_bot.py nao encontrado em {main_path}")
                 self.update_status("Erro", "#e74c3c")
                 return
 
@@ -652,7 +710,7 @@ class BotManager(ctk.CTk):
                                 0, winreg.KEY_SET_VALUE)
 
             if self.autostart_var.get():
-                script_path = os.path.abspath("main.py")
+                script_path = os.path.abspath("gerson_bot.py")
                 python_path = sys.executable
                 pythonw_path = python_path.replace("python.exe", "pythonw.exe")
 
