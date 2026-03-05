@@ -143,7 +143,7 @@ def eh_status_monitorado(status):
     return status_normalizado in STATUS_MONITORADOS
 
 # === FUNÇÕES DE CONTROLE DE LOCKFILE ===
-LOCKFILE_PATH = DATA_DIR / "bot_gerson.lock"
+LOCKFILE_PATH = BOT_DIR / "gerson_bot.lock"
 
 def criar_lockfile():
     """Cria o arquivo de lock com o PID do processo."""
