@@ -17,7 +17,8 @@
         "Carol":"1389654350904950856",
         "Lais/Eli":"1314633355727339592",
         "Fabiana":"1285344147292684359",
-        "CONTABIL":"1285301080087072788"
+        "CONTABIL":"1285301080087072788",
+        "JOAO":"1477992902968872980"
     },
 
     "_nota": "Se o responsável não estiver mapeado, o bot usará Fabiana e Lais/Eli como fallback"
