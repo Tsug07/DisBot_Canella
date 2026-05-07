@@ -143,7 +143,7 @@ def eh_status_monitorado(status):
     return status_normalizado in STATUS_MONITORADOS
 
 # === FUNÇÕES DE CONTROLE DE LOCKFILE ===
-LOCKFILE_PATH = DATA_DIR / "bot_gerson.lock"
+LOCKFILE_PATH = BOT_DIR / "gerson_bot.lock"
 
 def criar_lockfile():
     """Cria o arquivo de lock com o PID do processo."""
@@ -2799,7 +2799,11 @@ async def relatorio_anual(interaction: discord.Interaction, ano: int = None):
     Args:
         ano: Ano (ex: 2025). Se não informado, usa o ano atual.
     """
-    await interaction.response.defer()  # Indica que o bot está processando
+    try:
+        await interaction.response.defer()
+    except discord.errors.NotFound:
+        logger.warning(f"Interação expirada antes do defer() no /relatorio-anual (usuário: {interaction.user}). Tente novamente.")
+        return
 
     try:
         # Define o ano

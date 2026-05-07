@@ -9,7 +9,9 @@
       "Bash(tasklist /FI \"IMAGENAME eq python.exe\" /V /FO CSV)",
       "Bash(findstr:*)",
       "Bash(wmic process where:*)",
-      "Bash(ls -d \"C:/Users/Canella e Santos/Desktop/Hugo/DisBot_Canella\"/Bot_*)"
+      "Bash(ls -d \"C:/Users/Canella e Santos/Desktop/Hugo/DisBot_Canella\"/Bot_*)",
+      "Bash(tasklist:*)",
+      "Bash(git add *)"
     ],
     "deny": [],
     "ask": []

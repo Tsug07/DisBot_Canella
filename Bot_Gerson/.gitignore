@@ -10,6 +10,7 @@ logs/
 # Arquivos de processo
 *.pid
 bot_config.json
+*.lock
 
 # Python
 __pycache__/
