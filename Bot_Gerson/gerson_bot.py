@@ -66,6 +66,10 @@ GESTTA_ALERT_MENTIONS = os.getenv(
 )
 # Intervalo mínimo (segundos) entre alertas repetidos, para evitar spam.
 GESTTA_ALERT_THROTTLE_SEG = int(os.getenv('GESTTA_ALERT_THROTTLE_SEG', '3600'))
+# De quantas em quantas horas renovar o token do Gestta (Chrome headless).
+GESTTA_TOKEN_INTERVALO_H = int(os.getenv('GESTTA_TOKEN_INTERVALO_H', '6'))
+# Hora do dia (0-23) para rodar a reconciliação completa dos contatos.
+GESTTA_RECONCILE_HORA = int(os.getenv('GESTTA_RECONCILE_HORA', '7'))
 try:
     import messenger_gestta  # módulo local (Bot_Gerson/messenger_gestta.py)
 except Exception as _e_gestta:  # noqa
@@ -415,6 +419,11 @@ class MyBot(discord.Client):
         self.loop.create_task(self.monitorar_planilha())
         self.loop.create_task(self.verificar_relatorio_mensal())
         self.loop.create_task(self.verificar_relatorio_semanal_suspensas())
+
+        # Tarefas da integração Gestta (só se habilitada)
+        if GESTTA_SYNC_ENABLED and messenger_gestta is not None:
+            self.loop.create_task(self.manter_token_gestta())
+            self.loop.create_task(self.reconciliacao_diaria_gestta())
 
     async def on_member_join(self, member):
         """Envia mensagem de boas-vindas quando um novo membro entra no servidor."""
@@ -1128,6 +1137,51 @@ class MyBot(discord.Client):
             logger.info("Alerta de falha do Gestta enviado no Discord.")
         except Exception as e:  # noqa
             logger.error(f"Falha ao enviar alerta Gestta no Discord: {e}")
+
+    async def manter_token_gestta(self):
+        """Loop em background: renova o token do Gestta periodicamente (Chrome headless,
+        SSO automático). Se falhar (sessão Onvio caiu), alerta no Discord."""
+        try:
+            import atualizar_token_gestta as _refresh
+        except Exception as e:  # noqa
+            logger.error(f"[Gestta] Módulo de token indisponível: {e}")
+            return
+        await asyncio.sleep(20)  # deixa o bot estabilizar
+        while True:
+            try:
+                ok, msg = await asyncio.to_thread(_refresh.renovar, launch=True, forcar=True)
+                if ok:
+                    logger.info(f"[Gestta] Token: {msg}")
+                else:
+                    logger.error(f"[Gestta] Token: {msg}")
+                    self._agendar_alerta_gestta("token", msg)
+            except Exception as e:  # noqa
+                logger.error(f"[Gestta] Erro no loop de renovação de token: {e}")
+                self._agendar_alerta_gestta("token", str(e))
+            await asyncio.sleep(max(1, GESTTA_TOKEN_INTERVALO_H) * 3600)
+
+    async def reconciliacao_diaria_gestta(self):
+        """Loop em background: 1x/dia varre todos os contatos e corrige as marcações
+        [SUSPENSA] conforme o estado atual das empresas (pega divergências)."""
+        await asyncio.sleep(90)
+        ultima_data = None
+        while True:
+            try:
+                agora = datetime.now()
+                if agora.hour == GESTTA_RECONCILE_HORA and ultima_data != agora.date():
+                    ultima_data = agora.date()
+                    logger.info("[Gestta] Iniciando reconciliação diária dos contatos...")
+                    res = await asyncio.to_thread(messenger_gestta.sincronizar, apply=True)
+                    r = res.get("resumo", {})
+                    logger.info(
+                        f"[Gestta] Reconciliação: add={r.get('add')} fmt={r.get('fmt')} "
+                        f"remove={r.get('remove')} pulados={r.get('skip_risk')} "
+                        f"aplicados={r.get('aplicados')} erros={r.get('erros')}"
+                    )
+            except Exception as e:  # noqa
+                logger.error(f"[Gestta] Erro na reconciliação diária: {e}")
+                self._agendar_alerta_gestta("reconciliação diária", str(e))
+            await asyncio.sleep(1800)  # verifica a cada 30 min
 
     def registrar_empresa_suspensa(self, codigo, nome):
         """Registra uma empresa suspensa no histórico semanal."""
