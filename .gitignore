@@ -12,6 +12,7 @@ bot_logs.log
 # Configurações sensíveis de cada bot
 Bot_*/config/.env
 Bot_*/config/*.json
+Bot_*/config/*_token.txt
 !Bot_*/config/.env.example
 
 nul
@@ -24,10 +25,7 @@ Bot_*/debug_output/
 # Arquivos de gerenciamento local (não versionar)
 Bot_*/bot_config.json
 Bot_*/*.pid
-Bot_*/rebecca_bot.pid
-Bot_*/bot_rebecca.lock
-Bot_*/gerson_bot.pid
-Bot_*/bot_bip.lock
+Bot_*/*.lock
 bip_bot.pid
 
 # Arquivos de setup gerados localmente
