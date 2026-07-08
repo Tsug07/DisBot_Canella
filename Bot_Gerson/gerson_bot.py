@@ -51,6 +51,19 @@ GOOGLE_SHEET_ID = os.getenv('GOOGLE_SHEET_ID')
 PATH_CREDENTIALS = CONFIG_DIR / os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
 DIA_RELATORIO_MENSAL = int(os.getenv('DIA_RELATORIO_MENSAL', '5'))  # Dia do mês para enviar relatório
 
+# === INTEGRAÇÃO GESTTA MESSENGER (opcional) ===
+# Quando habilitada, ao suspender/reativar uma empresa o bot atualiza a marcação
+# "[SUSPENSA: <codigo>]" nos contatos do Messenger do Gestta que citam aquele código.
+# Só roda se GESTTA_SYNC_ENABLED=1 no .env E houver token válido (GESTTA_JWT ou
+# config/gestta_token.txt). É best-effort: qualquer erro é logado e NÃO quebra o bot.
+GESTTA_SYNC_ENABLED = os.getenv('GESTTA_SYNC_ENABLED', '0') in ('1', 'true', 'True')
+try:
+    import messenger_gestta  # módulo local (Bot_Gerson/messenger_gestta.py)
+except Exception as _e_gestta:  # noqa
+    messenger_gestta = None
+    if GESTTA_SYNC_ENABLED:
+        logger.warning(f"Integração Gestta habilitada mas módulo não pôde ser importado: {_e_gestta}")
+
 STATUS_MONITORADOS = ["INATIVA", "BAIXA", "DEVOLVIDA", "SUSPENSA"]
 
 # Mapeamento de variações de status e regimes para valores normalizados
@@ -1035,6 +1048,27 @@ class MyBot(discord.Client):
         ano_iso, semana_iso, _ = data.isocalendar()
         return f"{ano_iso}-W{semana_iso:02d}"
 
+    def sincronizar_gestta_codigo(self, codigo):
+        """Atualiza (em background) a marcação [SUSPENSA] nos contatos do Gestta
+        que citam este código. Best-effort: nunca lança exceção para o chamador."""
+        if not GESTTA_SYNC_ENABLED or messenger_gestta is None:
+            return
+
+        def _worker():
+            try:
+                res = messenger_gestta.atualizar_por_codigo(codigo, apply=True)
+                logger.info(
+                    f"Gestta sync código {codigo}: {res.get('aplicados', 0)} contato(s) "
+                    f"atualizado(s), {len(res.get('erros', []))} erro(s)."
+                )
+            except Exception as e:  # noqa
+                logger.error(f"Gestta sync código {codigo} falhou: {e}")
+
+        try:
+            asyncio.create_task(asyncio.to_thread(_worker))
+        except Exception as e:  # noqa
+            logger.error(f"Não foi possível agendar sync Gestta para {codigo}: {e}")
+
     def registrar_empresa_suspensa(self, codigo, nome):
         """Registra uma empresa suspensa no histórico semanal."""
         agora = datetime.now()
@@ -1060,6 +1094,9 @@ class MyBot(discord.Client):
             asyncio.create_task(self.salvar_historico_suspensas())
 
             logger.info(f"Empresa suspensa registrada: {codigo} - {nome} (Semana: {semana})")
+
+            # Reflete a suspensão nos contatos do Messenger do Gestta (best-effort)
+            self.sincronizar_gestta_codigo(codigo)
         else:
             logger.info(f"Empresa {codigo} já registrada como suspensa nesta semana ({semana})")
 
@@ -1089,6 +1126,9 @@ class MyBot(discord.Client):
                     empresa_removida = True
                     logger.info(f"Empresa removida do histórico de suspensas: {codigo} - {nome_empresa} (Semana: {semana})")
                     print(f"   Empresa {codigo} removida do histórico de suspensas (voltou a ficar ATIVA)")
+
+                    # Remove a marcação [SUSPENSA] dos contatos do Gestta (best-effort)
+                    self.sincronizar_gestta_codigo(codigo)
                     break
 
             # Se a semana ficou sem empresas, remove a entrada
