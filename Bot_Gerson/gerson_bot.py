@@ -57,6 +57,15 @@ DIA_RELATORIO_MENSAL = int(os.getenv('DIA_RELATORIO_MENSAL', '5'))  # Dia do mê
 # Só roda se GESTTA_SYNC_ENABLED=1 no .env E houver token válido (GESTTA_JWT ou
 # config/gestta_token.txt). É best-effort: qualquer erro é logado e NÃO quebra o bot.
 GESTTA_SYNC_ENABLED = os.getenv('GESTTA_SYNC_ENABLED', '0') in ('1', 'true', 'True')
+# Menções do alerta de falha na sincronização com o Gestta (sessão SSO expirada, etc.).
+# <@&ID> = cargo (role) | <@ID> = usuário. Ajuste conforme necessário no .env
+# (GESTTA_ALERT_MENTIONS) ou aqui.
+GESTTA_ALERT_MENTIONS = os.getenv(
+    'GESTTA_ALERT_MENTIONS',
+    '<@&1445091729047818360> <@1285316758009544844>'
+)
+# Intervalo mínimo (segundos) entre alertas repetidos, para evitar spam.
+GESTTA_ALERT_THROTTLE_SEG = int(os.getenv('GESTTA_ALERT_THROTTLE_SEG', '3600'))
 try:
     import messenger_gestta  # módulo local (Bot_Gerson/messenger_gestta.py)
 except Exception as _e_gestta:  # noqa
@@ -1063,11 +1072,62 @@ class MyBot(discord.Client):
                 )
             except Exception as e:  # noqa
                 logger.error(f"Gestta sync código {codigo} falhou: {e}")
+                # Falha típica: token/sessão SSO do Gestta expirou. Alerta no Discord.
+                self._agendar_alerta_gestta(codigo, str(e))
 
         try:
             asyncio.create_task(asyncio.to_thread(_worker))
         except Exception as e:  # noqa
             logger.error(f"Não foi possível agendar sync Gestta para {codigo}: {e}")
+
+    def _agendar_alerta_gestta(self, codigo, motivo):
+        """Agenda (thread-safe) o envio do alerta de falha do Gestta no Discord,
+        com throttle para evitar repetição."""
+        agora = datetime.now()
+        ultimo = getattr(self, '_ultimo_alerta_gestta', None)
+        if ultimo and (agora - ultimo).total_seconds() < GESTTA_ALERT_THROTTLE_SEG:
+            return  # já alertou há pouco; não repete
+        self._ultimo_alerta_gestta = agora
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._alertar_falha_gestta(codigo, motivo), self.loop
+            )
+        except Exception as e:  # noqa
+            logger.error(f"Não foi possível enviar alerta Gestta: {e}")
+
+    async def _alertar_falha_gestta(self, codigo, motivo):
+        """Envia o alerta de falha de sincronização com o Gestta no Discord."""
+        canal = self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID) or self.get_channel(DISCORD_CHANNEL_ID)
+        if canal is None:
+            logger.error("Alerta Gestta: nenhum canal do Discord disponível.")
+            return
+        embed = discord.Embed(
+            title="⚠️ Sincronização com o Messenger (Gestta) falhou",
+            description=(
+                "Não foi possível atualizar a marcação **[SUSPENSA]** nos contatos do "
+                "Messenger. A causa mais provável é a **sessão do Onvio ter expirado**."
+            ),
+            color=0xF44336
+        )
+        embed.add_field(name="Empresa (código)", value=f"**{codigo}**", inline=True)
+        embed.add_field(name="Data/Hora", value=datetime.now().strftime("%d/%m/%Y %H:%M:%S"), inline=True)
+        embed.add_field(
+            name="Ação necessária",
+            value="Rodar `scripts\\iniciar_chrome_gestta.bat`, fazer **login no Onvio** "
+                  "uma vez e fechar. Depois a renovação automática volta a funcionar.",
+            inline=False
+        )
+        embed.add_field(name="Detalhe técnico", value=f"```{str(motivo)[:300]}```", inline=False)
+        embed.set_footer(text="Canella & Santos • Integração Gestta")
+        try:
+            await canal.send(
+                GESTTA_ALERT_MENTIONS,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True, users=True, everyone=False)
+            )
+            logger.info("Alerta de falha do Gestta enviado no Discord.")
+        except Exception as e:  # noqa
+            logger.error(f"Falha ao enviar alerta Gestta no Discord: {e}")
 
     def registrar_empresa_suspensa(self, codigo, nome):
         """Registra uma empresa suspensa no histórico semanal."""
