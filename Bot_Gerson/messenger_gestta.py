@@ -73,9 +73,20 @@ def _norm_code(code):
 
 
 def carregar_estado(estado_path=ESTADO_PATH):
-    """Le estado_empresas.json e devolve (suspensas:set, conhecidas:set) de codigos normalizados."""
-    with open(estado_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+    """Le estado_empresas.json e devolve (suspensas:set, conhecidas:set) de codigos normalizados.
+
+    Faz retry em caso de leitura parcial (o Gerson pode estar gravando o arquivo
+    no mesmo instante); com a gravacao atomica do Gerson isso vira redundancia segura."""
+    data = None
+    for tentativa in range(4):
+        try:
+            with open(estado_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            break
+        except (json.JSONDecodeError, ValueError):
+            if tentativa == 3:
+                raise
+            time.sleep(0.4)
     registros = data.get("registros", data)  # compat: pode ser {registros:{...}} ou {...}
     suspensas, conhecidas = set(), set()
     for codigo, info in registros.items():
@@ -156,8 +167,8 @@ def calcular_novo_nome(name, suspensas, conhecidas):
 # Cliente HTTP do Gestta
 # ----------------------------------------------------------------------------
 def _tentar_renovar_do_chrome():
-    """Tenta renovar o token lendo de um Chrome logado (best-effort).
-    Controlado por GESTTA_CHROME_HOST / GESTTA_CHROME_PORT (padrao 127.0.0.1:9222)."""
+    """Tenta renovar o token subindo um Chrome headless proprio (SSO automatico).
+    Best-effort: qualquer erro apenas gera aviso no log."""
     try:
         import atualizar_token_gestta as _refresh
     except Exception:  # noqa
@@ -168,7 +179,9 @@ def _tentar_renovar_do_chrome():
     except ValueError:
         porta = 9222
     try:
-        ok, msg = _refresh.renovar(host, porta)
+        # launch=True: sobe um Chrome headless com o perfil salvo, faz o SSO do
+        # Onvio sozinho, le o token e fecha (nao depende de um Chrome ja aberto).
+        ok, msg = _refresh.renovar(host, porta, launch=True, forcar=True)
         logger.info("Renovacao de token Gestta: %s", msg)
     except Exception as e:  # noqa
         logger.warning("Nao foi possivel renovar token do Gestta: %s", e)

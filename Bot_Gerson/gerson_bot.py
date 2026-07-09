@@ -70,6 +70,10 @@ GESTTA_ALERT_THROTTLE_SEG = int(os.getenv('GESTTA_ALERT_THROTTLE_SEG', '3600'))
 GESTTA_TOKEN_INTERVALO_H = int(os.getenv('GESTTA_TOKEN_INTERVALO_H', '6'))
 # Hora do dia (0-23) para rodar a reconciliação completa dos contatos.
 GESTTA_RECONCILE_HORA = int(os.getenv('GESTTA_RECONCILE_HORA', '7'))
+# Canal do Discord para os alertas de FALHA da integração Gestta.
+# Se não configurado, usa este ID padrão; e cai no canal de suspensas/principal
+# apenas se este não existir.
+GESTTA_ALERT_CHANNEL_ID = int(os.getenv('GESTTA_ALERT_CHANNEL_ID', '1491780750532673637'))
 try:
     import messenger_gestta  # módulo local (Bot_Gerson/messenger_gestta.py)
 except Exception as _e_gestta:  # noqa
@@ -888,8 +892,13 @@ class MyBot(discord.Client):
                 "ultima_verificacao": agora.strftime("%d/%m/%Y %H:%M:%S"),
                 "registros": dados
             }
-            with open(caminho, "w", encoding="utf-8") as f:
+            # Gravação atômica: escreve em .tmp e substitui (evita que leitores —
+            # ex.: a sincronização do Gestta em outra thread — leiam um arquivo
+            # parcialmente escrito e quebrem com erro de JSON).
+            temp_path = caminho.with_suffix(".tmp")
+            with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(estado_completo, f, indent=4, ensure_ascii=False)
+            os.replace(temp_path, caminho)
 
             # Backup automático
             timestamp = agora.strftime("%Y%m%d_%H%M%S")
@@ -1106,7 +1115,9 @@ class MyBot(discord.Client):
 
     async def _alertar_falha_gestta(self, codigo, motivo):
         """Envia o alerta de falha de sincronização com o Gestta no Discord."""
-        canal = self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID) or self.get_channel(DISCORD_CHANNEL_ID)
+        canal = (self.get_channel(GESTTA_ALERT_CHANNEL_ID)
+                 or self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID)
+                 or self.get_channel(DISCORD_CHANNEL_ID))
         if canal is None:
             logger.error("Alerta Gestta: nenhum canal do Discord disponível.")
             return
@@ -1160,28 +1171,85 @@ class MyBot(discord.Client):
                 self._agendar_alerta_gestta("token", str(e))
             await asyncio.sleep(max(1, GESTTA_TOKEN_INTERVALO_H) * 3600)
 
+    def _ler_ultima_reconciliacao(self):
+        """Data (date) da última reconciliação bem-sucedida, persistida em disco."""
+        try:
+            p = DATA_DIR / "gestta_ultima_reconciliacao.txt"
+            if p.exists():
+                return datetime.strptime(p.read_text(encoding="utf-8").strip(), "%Y-%m-%d").date()
+        except Exception:  # noqa
+            pass
+        return None
+
+    def _salvar_ultima_reconciliacao(self, data):
+        try:
+            (DATA_DIR / "gestta_ultima_reconciliacao.txt").write_text(
+                data.strftime("%Y-%m-%d"), encoding="utf-8"
+            )
+        except Exception as e:  # noqa
+            logger.error(f"[Gestta] Não foi possível salvar data da reconciliação: {e}")
+
     async def reconciliacao_diaria_gestta(self):
         """Loop em background: 1x/dia varre todos os contatos e corrige as marcações
-        [SUSPENSA] conforme o estado atual das empresas (pega divergências)."""
+        [SUSPENSA] conforme o estado atual das empresas.
+
+        Roda quando já passou da hora configurada e ainda não rodou no dia — isso
+        cobre o caso de o bot ter ficado desligado às 7h e subir depois (executa a
+        varredura pendente). A data da última execução é persistida em disco, então
+        reiniciar o bot no mesmo dia não duplica a varredura."""
         await asyncio.sleep(90)
-        ultima_data = None
         while True:
             try:
                 agora = datetime.now()
-                if agora.hour == GESTTA_RECONCILE_HORA and ultima_data != agora.date():
-                    ultima_data = agora.date()
-                    logger.info("[Gestta] Iniciando reconciliação diária dos contatos...")
+                ultima = self._ler_ultima_reconciliacao()
+                if agora.hour >= GESTTA_RECONCILE_HORA and ultima != agora.date():
+                    catchup = agora.hour > GESTTA_RECONCILE_HORA
+                    logger.info(
+                        "[Gestta] Iniciando reconciliação diária%s...",
+                        " (pendente/catch-up)" if catchup else ""
+                    )
                     res = await asyncio.to_thread(messenger_gestta.sincronizar, apply=True)
+                    self._salvar_ultima_reconciliacao(agora.date())
                     r = res.get("resumo", {})
                     logger.info(
                         f"[Gestta] Reconciliação: add={r.get('add')} fmt={r.get('fmt')} "
                         f"remove={r.get('remove')} pulados={r.get('skip_risk')} "
                         f"aplicados={r.get('aplicados')} erros={r.get('erros')}"
                     )
+                    await self._notificar_reconciliacao_gestta(r, catchup=catchup)
             except Exception as e:  # noqa
                 logger.error(f"[Gestta] Erro na reconciliação diária: {e}")
                 self._agendar_alerta_gestta("reconciliação diária", str(e))
             await asyncio.sleep(1800)  # verifica a cada 30 min
+
+    async def _notificar_reconciliacao_gestta(self, resumo, catchup=False):
+        """Posta no canal de alerta um resumo da varredura diária (sempre que roda)."""
+        canal = (self.get_channel(GESTTA_ALERT_CHANNEL_ID)
+                 or self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID)
+                 or self.get_channel(DISCORD_CHANNEL_ID))
+        if canal is None:
+            return
+        erros = resumo.get("erros", 0) or 0
+        titulo = ("✅ Varredura do Messenger (Gestta) — execução pendente concluída"
+                  if catchup else "✅ Varredura diária do Messenger (Gestta) concluída")
+        embed = discord.Embed(
+            title=titulo,
+            color=(0x4CAF50 if not erros else 0xFF9800),
+            description="Marcações **[SUSPENSA]** dos contatos sincronizadas com o estado atual das empresas."
+        )
+        embed.add_field(name="Adicionadas", value=str(resumo.get("add", 0)), inline=True)
+        embed.add_field(name="Reformatadas", value=str(resumo.get("fmt", 0)), inline=True)
+        embed.add_field(name="Removidas", value=str(resumo.get("remove", 0)), inline=True)
+        embed.add_field(name="Aplicadas", value=str(resumo.get("aplicados", 0)), inline=True)
+        embed.add_field(name="Puladas (arriscadas)", value=str(resumo.get("skip_risk", 0)), inline=True)
+        embed.add_field(name="Erros", value=str(erros), inline=True)
+        embed.add_field(name="Data/Hora", value=datetime.now().strftime("%d/%m/%Y %H:%M:%S"), inline=False)
+        embed.set_footer(text="Canella & Santos • Integração Gestta")
+        try:
+            await canal.send(embed=embed)
+            logger.info("[Gestta] Notificação de reconciliação enviada no Discord.")
+        except Exception as e:  # noqa
+            logger.error(f"[Gestta] Falha ao notificar reconciliação: {e}")
 
     def registrar_empresa_suspensa(self, codigo, nome):
         """Registra uma empresa suspensa no histórico semanal."""
