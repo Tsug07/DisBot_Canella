@@ -71,6 +71,9 @@ AUTH_HOST = "auth.thomsonreuters.com"
 # enquanto a sessao do perfil estiver viva; sem elas, cai no aviso de login manual.
 ONVIO_EMAIL = os.environ.get("GESTTA_ONVIO_EMAIL", "")
 ONVIO_SENHA = os.environ.get("GESTTA_ONVIO_SENHA", "")
+# Chave secreta TOTP (base32) do autenticador. Se definida, o bot gera o codigo
+# 2FA localmente (preferido). Sem ela, cai no leitor de e-mail (Gmail).
+ONVIO_TOTP_SECRET = os.environ.get("GESTTA_ONVIO_TOTP_SECRET", "")
 
 logger = logging.getLogger("atualizar_token_gestta")
 
@@ -240,6 +243,13 @@ def _navegar(ws, contador, url, espera=5):
     time.sleep(espera)
 
 
+def _gerar_totp(secret):
+    """Gera o código TOTP de 6 dígitos a partir da chave base32 do autenticador."""
+    import pyotp
+    s = re.sub(r"\s+", "", secret or "")  # remove espaços do secret
+    return pyotp.TOTP(s).now()
+
+
 def _js_set_input(seletores, valor):
     """Gera JS que preenche o 1o input visivel que casar com os seletores (React-safe)."""
     return (
@@ -287,18 +297,27 @@ def _fazer_login_auth0(ws, contador, inicio_epoch):
     _eval(ws, contador, _js_click(sel_submit))
     time.sleep(6)
 
-    # 2FA por e-mail: o Auth0 envia o codigo ao chegar na tela de desafio.
+    # 2FA: se ha campo de codigo, obtem o codigo — preferindo o TOTP local
+    # (autenticador); se nao houver secret, cai no leitor de e-mail (Gmail).
     tem_codigo = _eval(ws, contador,
                        "!!document.querySelector(\"input[name='code'],input#code,"
                        "input[autocomplete='one-time-code'],input[inputmode='numeric']\")")
     if tem_codigo:
-        logger.info("[login] Tela de 2FA detectada; lendo codigo no Gmail...")
-        try:
-            import ler_2fa_gmail
-            codigo = ler_2fa_gmail.obter_codigo_2fa(desde_epoch=inicio_epoch, timeout=120)
-        except Exception as e:  # noqa
-            logger.error("[login] Nao foi possivel obter o codigo 2FA: %s", e)
-            return False
+        codigo = None
+        if ONVIO_TOTP_SECRET:
+            try:
+                codigo = _gerar_totp(ONVIO_TOTP_SECRET)
+                logger.info("[login] 2FA via TOTP (autenticador, gerado localmente).")
+            except Exception as e:  # noqa
+                logger.error("[login] Falha ao gerar TOTP: %s", e)
+        if not codigo:
+            logger.info("[login] 2FA: lendo codigo no Gmail...")
+            try:
+                import ler_2fa_gmail
+                codigo = ler_2fa_gmail.obter_codigo_2fa(desde_epoch=inicio_epoch, timeout=120)
+            except Exception as e:  # noqa
+                logger.error("[login] Nao foi possivel obter o codigo 2FA: %s", e)
+                return False
         _eval(ws, contador, _js_set_input(
             ["input[name='code']", "input#code", "input[autocomplete='one-time-code']",
              "input[inputmode='numeric']"], codigo))
