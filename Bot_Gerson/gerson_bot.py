@@ -1246,7 +1246,11 @@ class MyBot(discord.Client):
         embed.add_field(name="Data/Hora", value=datetime.now().strftime("%d/%m/%Y %H:%M:%S"), inline=False)
         embed.set_footer(text="Canella & Santos • Integração Gestta")
         try:
-            await canal.send(embed=embed)
+            await canal.send(
+                GESTTA_ALERT_MENTIONS,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True, users=True, everyone=False)
+            )
             logger.info("[Gestta] Notificação de reconciliação enviada no Discord.")
         except Exception as e:  # noqa
             logger.error(f"[Gestta] Falha ao notificar reconciliação: {e}")

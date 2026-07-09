@@ -61,6 +61,16 @@ GESTTA_URL = "https://app.gestta.com.br"
 GESTTA_URL_HINT = "gestta.com.br"
 ONVIO_LOGIN = "https://onvio.com.br/login/#/"
 MESSENGER_URL = "https://app.gestta.com.br/attendance/#/chat/pending"
+# Launcher do Messenger dentro do Onvio: é ELE que faz o handoff/SSO para o Gestta.
+# Numa sessão recém-logada, ir direto na MESSENGER_URL NÃO autentica — tem que passar
+# por aqui (equivale a clicar em "Messenger" no menu "Minhas Aplicações").
+MESSENGER_LAUNCH = "https://onvio.com.br/br-messenger/"
+AUTH_HOST = "auth.thomsonreuters.com"
+
+# Credenciais para login automatico (opcional). Se ausentes, o fluxo so funciona
+# enquanto a sessao do perfil estiver viva; sem elas, cai no aviso de login manual.
+ONVIO_EMAIL = os.environ.get("GESTTA_ONVIO_EMAIL", "")
+ONVIO_SENHA = os.environ.get("GESTTA_ONVIO_SENHA", "")
 
 logger = logging.getLogger("atualizar_token_gestta")
 
@@ -230,13 +240,86 @@ def _navegar(ws, contador, url, espera=5):
     time.sleep(espera)
 
 
+def _js_set_input(seletores, valor):
+    """Gera JS que preenche o 1o input visivel que casar com os seletores (React-safe)."""
+    return (
+        "(function(){var set=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;"
+        "var sels=%s;var el=null;for(var i=0;i<sels.length;i++){el=document.querySelector(sels[i]);"
+        "if(el&&el.offsetParent!==null)break;el=null;}"
+        "if(!el)return false;set.call(el,%s);"
+        "el.dispatchEvent(new Event('input',{bubbles:true}));"
+        "el.dispatchEvent(new Event('change',{bubbles:true}));return true;})()"
+        % (json.dumps(seletores), json.dumps(valor))
+    )
+
+
+def _js_click(seletores):
+    return (
+        "(function(){var sels=%s;for(var i=0;i<sels.length;i++){var el=document.querySelector(sels[i]);"
+        "if(el&&el.offsetParent!==null){el.click();return true;}}return false;})()"
+        % json.dumps(seletores)
+    )
+
+
+def _fazer_login_auth0(ws, contador, inicio_epoch):
+    """Preenche credenciais na tela Auth0 e resolve o 2FA por e-mail (Gmail).
+    Retorna True se acha que completou o login. Requer GESTTA_ONVIO_EMAIL/SENHA."""
+    if not ONVIO_EMAIL or not ONVIO_SENHA:
+        logger.warning("Login automatico indisponivel: defina GESTTA_ONVIO_EMAIL e GESTTA_ONVIO_SENHA no .env.")
+        return False
+
+    sel_email = ["input#username", "input[name='username']", "input[type='email']",
+                 "input[autocomplete='username']"]
+    sel_senha = ["input#password", "input[name='password']", "input[type='password']"]
+    sel_submit = ["button[type='submit']", "button[name='action']", "button[value='default']"]
+
+    # Etapa identificador (se a pagina pedir so o e-mail antes da senha)
+    _eval(ws, contador, _js_set_input(sel_email, ONVIO_EMAIL))
+    tem_senha = _eval(ws, contador,
+                      "!!document.querySelector(\"input[type='password']\")")
+    if not tem_senha:
+        _eval(ws, contador, _js_click(sel_submit))
+        time.sleep(4)
+        _eval(ws, contador, _js_set_input(sel_email, ONVIO_EMAIL))
+
+    # Preenche senha e envia
+    _eval(ws, contador, _js_set_input(sel_senha, ONVIO_SENHA))
+    _eval(ws, contador, _js_click(sel_submit))
+    time.sleep(6)
+
+    # 2FA por e-mail: o Auth0 envia o codigo ao chegar na tela de desafio.
+    tem_codigo = _eval(ws, contador,
+                       "!!document.querySelector(\"input[name='code'],input#code,"
+                       "input[autocomplete='one-time-code'],input[inputmode='numeric']\")")
+    if tem_codigo:
+        logger.info("[login] Tela de 2FA detectada; lendo codigo no Gmail...")
+        try:
+            import ler_2fa_gmail
+            codigo = ler_2fa_gmail.obter_codigo_2fa(desde_epoch=inicio_epoch, timeout=120)
+        except Exception as e:  # noqa
+            logger.error("[login] Nao foi possivel obter o codigo 2FA: %s", e)
+            return False
+        _eval(ws, contador, _js_set_input(
+            ["input[name='code']", "input#code", "input[autocomplete='one-time-code']",
+             "input[inputmode='numeric']"], codigo))
+        # marca "lembrar deste dispositivo", se existir
+        _eval(ws, contador,
+              "(function(){var c=document.querySelector(\"input[name='rememberBrowser'],"
+              "input#rememberBrowser,input[type='checkbox']\");"
+              "if(c&&!c.checked)c.click();return !!c;})()")
+        _eval(ws, contador, _js_click(sel_submit))
+        time.sleep(6)
+    return True
+
+
 def obter_token_via_sso(host=DEFAULT_HOST, porta=DEFAULT_PORT):
     """
     Fluxo completo e automatico, dirigido por CDP:
       1. abre o Messenger; se ja logado, le o token e retorna;
-      2. senao, vai ao login do Onvio e clica "Entrar" (SSO silencioso via
-         sessao salva no perfil) e volta ao Messenger para ler o token.
-    So falha se a sessao SSO do perfil tiver expirado (precisa login manual 1x).
+      2. senao, vai ao login do Onvio e clica "Entrar";
+      3. se cair na tela de login da Thomson Reuters (Auth0), faz login com
+         credenciais do .env + 2FA lido do Gmail;
+      4. volta ao Messenger e le o token.
     """
     if websocket is None:
         raise RuntimeError("Biblioteca 'websocket-client' nao instalada.")
@@ -250,22 +333,44 @@ def obter_token_via_sso(host=DEFAULT_HOST, porta=DEFAULT_PORT):
             t = str(t).strip().strip('"')
             return t or None
 
-        # 1) tenta direto no Messenger
+        def ler_com_retry(tentativas=6, intervalo=2.5):
+            for _ in range(tentativas):
+                t = ler()
+                if t:
+                    return t
+                time.sleep(intervalo)
+            return None
+
+        # 1) caminho rápido: se a sessão do Gestta ainda estiver viva, o token
+        #    já aparece indo direto no Messenger.
         _navegar(ws, c, MESSENGER_URL, espera=6)
         tok = ler()
-        # 2) se nao logou, faz o SSO pelo Onvio
+        # 2) senão, faz login no Onvio e usa o launcher do Messenger p/ o handoff
         if not tok:
+            inicio = time.time()
             _navegar(ws, c, ONVIO_LOGIN, espera=4)
             _eval(ws, c,
                   "(function(){var b=[].slice.call(document.querySelectorAll('button'))"
                   ".find(function(x){return x.innerText.trim()==='Entrar'&&x.offsetParent!==null});"
                   "if(b){b.click();return true}return false})()")
-            time.sleep(8)  # aguarda o redirect do SSO
-            _navegar(ws, c, MESSENGER_URL, espera=6)
-            tok = ler()
+            time.sleep(8)  # aguarda redirect (SSO silencioso ou tela de login)
+            # 3) se caiu na tela de login da Thomson Reuters, faz login + 2FA
+            url_atual = _eval(ws, c, "location.href") or ""
+            if AUTH_HOST in url_atual:
+                logger.info("[login] Tela de login detectada; tentando login automatico...")
+                _fazer_login_auth0(ws, c, inicio)
+                time.sleep(5)
+            # 4) HANDOFF: acessa o launcher do Messenger no Onvio (equivale a clicar
+            #    em "Messenger"); ele redireciona para o Gestta já autenticado.
+            _navegar(ws, c, MESSENGER_LAUNCH, espera=8)
+            tok = ler_com_retry()
+            # fallback: garante estar na rota do chat e tenta de novo
+            if not tok:
+                _navegar(ws, c, MESSENGER_URL, espera=6)
+                tok = ler_com_retry()
         if not tok:
-            raise RuntimeError("Nao foi possivel obter o token via SSO "
-                               "(sessao do Onvio provavelmente expirou; faca login manual 1x).")
+            raise RuntimeError("Nao foi possivel obter o token via SSO/login "
+                               "(sessao expirou e/ou login automatico falhou; verifique credenciais/2FA).")
         return tok if tok.upper().startswith("JWT ") else "JWT " + tok
     finally:
         try:
