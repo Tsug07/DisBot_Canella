@@ -304,7 +304,8 @@ def _fazer_login_auth0(ws, contador, inicio_epoch):
     sel_email = ["input#username", "input[name='username']", "input[type='email']",
                  "input[autocomplete='username']"]
     sel_senha = ["input#password", "input[name='password']", "input[type='password']"]
-    sel_submit = ["button[type='submit']", "button[name='action']", "button[value='default']"]
+    sel_submit = ["button[data-action-button-primary='true']", "button[value='default']",
+                  "button[type='submit']", "button[name='action']"]
 
     # Etapa identificador (se a pagina pedir so o e-mail antes da senha)
     _eval(ws, contador, _js_set_input(sel_email, ONVIO_EMAIL))
@@ -328,7 +329,13 @@ def _fazer_login_auth0(ws, contador, inicio_epoch):
     url = _eval(ws, contador, "location.href") or ""
     if "mfa-login-options" in url or not _eval(ws, contador, TEM_CODIGO_JS):
         escolhido = _eval(ws, contador,
-            "(function(){var kw=/autentic|c[oó]digo de uso|senha de uso|uso [uú]nico|"
+            "(function(){"
+            # seletor exato do Auth0: botao do fator 'otp' (autenticador)
+            "var b=document.querySelector(\"button[value^='otp'],.ulp-action-form-otp button,"
+            "li._selector-item-otp button\");"
+            "if(b&&b.offsetParent!==null){b.click();return b.getAttribute('aria-label')||'otp';}"
+            # fallback por texto
+            "var kw=/autentic|c[oó]digo de uso|senha de uso|uso [uú]nico|"
             "one.?time|token|google authenticator|aplicativo/i;"
             "var bad=/e-?mail|sms|telefone|recupera|backup/i;"
             "var els=[].slice.call(document.querySelectorAll('button,a,[role=button],li'));"
