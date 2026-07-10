@@ -74,6 +74,9 @@ ONVIO_SENHA = os.environ.get("GESTTA_ONVIO_SENHA", "")
 # Chave secreta TOTP (base32) do autenticador. Se definida, o bot gera o codigo
 # 2FA localmente (preferido). Sem ela, cai no leitor de e-mail (Gmail).
 ONVIO_TOTP_SECRET = os.environ.get("GESTTA_ONVIO_TOTP_SECRET", "")
+# Debug do login: registra no log a estrutura das telas (ids/nomes dos campos,
+# NUNCA valores/senha). Ligue com GESTTA_LOGIN_DEBUG=1 para mapear/depurar.
+LOGIN_DEBUG = os.environ.get("GESTTA_LOGIN_DEBUG", "0") in ("1", "true", "True")
 
 logger = logging.getLogger("atualizar_token_gestta")
 
@@ -250,6 +253,26 @@ def _gerar_totp(secret):
     return pyotp.TOTP(s).now()
 
 
+TEM_CODIGO_JS = ("!!document.querySelector(\"input[name='code'],input#code,"
+                 "input[autocomplete='one-time-code'],input[inputmode='numeric']\")")
+
+
+def _dump_estrutura(ws, contador):
+    """Devolve (string JSON) a estrutura da pagina: inputs e botoes/links visiveis
+    (apenas ids/nomes/textos — NUNCA valores). Usado no modo debug do login."""
+    js = ("(function(){function d(el){return {tag:el.tagName,id:el.id,"
+          "name:el.getAttribute('name'),type:el.getAttribute('type'),"
+          "txt:(el.innerText||'').trim().slice(0,35),vis:el.offsetParent!==null};}"
+          "var ins=[].slice.call(document.querySelectorAll('input')).map(d);"
+          "var bts=[].slice.call(document.querySelectorAll('button,a,[role=button]'))"
+          ".map(d).filter(function(x){return x.vis&&x.txt;});"
+          "return JSON.stringify({url:location.pathname,inputs:ins,botoes:bts.slice(0,15)});})()")
+    try:
+        return _eval(ws, contador, js)
+    except Exception:  # noqa
+        return "?"
+
+
 def _js_set_input(seletores, valor):
     """Gera JS que preenche o 1o input visivel que casar com os seletores (React-safe)."""
     return (
@@ -297,11 +320,30 @@ def _fazer_login_auth0(ws, contador, inicio_epoch):
     _eval(ws, contador, _js_click(sel_submit))
     time.sleep(6)
 
+    if LOGIN_DEBUG:
+        logger.info("[login][debug] pos-senha: %s", _dump_estrutura(ws, contador))
+
+    # Tela de ESCOLHA de metodo (Auth0 /u/mfa-login-options): seleciona o
+    # autenticador (app / codigo de uso unico), evitando e-mail/sms/backup.
+    url = _eval(ws, contador, "location.href") or ""
+    if "mfa-login-options" in url or not _eval(ws, contador, TEM_CODIGO_JS):
+        escolhido = _eval(ws, contador,
+            "(function(){var kw=/autentic|c[oó]digo de uso|senha de uso|uso [uú]nico|"
+            "one.?time|token|google authenticator|aplicativo/i;"
+            "var bad=/e-?mail|sms|telefone|recupera|backup/i;"
+            "var els=[].slice.call(document.querySelectorAll('button,a,[role=button],li'));"
+            "for(var i=0;i<els.length;i++){var t=(els[i].innerText||'').trim();"
+            "if(t&&kw.test(t)&&!bad.test(t)&&els[i].offsetParent!==null){els[i].click();return t.slice(0,40);}}"
+            "return false;})()")
+        if escolhido:
+            logger.info("[login] Metodo 2FA escolhido: %s", escolhido)
+            time.sleep(5)
+            if LOGIN_DEBUG:
+                logger.info("[login][debug] pos-escolha: %s", _dump_estrutura(ws, contador))
+
     # 2FA: se ha campo de codigo, obtem o codigo — preferindo o TOTP local
     # (autenticador); se nao houver secret, cai no leitor de e-mail (Gmail).
-    tem_codigo = _eval(ws, contador,
-                       "!!document.querySelector(\"input[name='code'],input#code,"
-                       "input[autocomplete='one-time-code'],input[inputmode='numeric']\")")
+    tem_codigo = _eval(ws, contador, TEM_CODIGO_JS)
     if tem_codigo:
         codigo = None
         if ONVIO_TOTP_SECRET:
