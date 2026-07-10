@@ -31,6 +31,7 @@ Dependencias: requests, websocket-client, psutil (todas ja no requirements.txt).
 """
 
 import os
+import re
 import sys
 import json
 import time
@@ -51,8 +52,18 @@ try:
 except ImportError:
     psutil = None
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOKEN_FILE = os.path.join(BASE_DIR, "config", "gestta_token.txt")
+
+# Carrega as variaveis de ambiente do arquivo .env na pasta config (o script
+# pode ser executado diretamente, sem passar pelo gerson_bot.py).
+if load_dotenv is not None:
+    load_dotenv(dotenv_path=os.path.join(BASE_DIR, "config", ".env"))
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9222
