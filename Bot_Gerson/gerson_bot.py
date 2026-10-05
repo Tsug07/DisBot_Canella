@@ -82,6 +82,8 @@ except Exception as _e_gestta:  # noqa
         logger.warning(f"Integração Gestta habilitada mas módulo não pôde ser importado: {_e_gestta}")
 
 STATUS_MONITORADOS = ["INATIVA", "BAIXA", "DEVOLVIDA", "SUSPENSA"]
+# Status que contam como empresa inativa nos contatos do Gestta ([#INATIVO]/[ENCERRADA])
+STATUS_INATIVOS_GESTTA = {"INATIVA", "BAIXA", "DEVOLVIDA"}
 
 # Mapeamento de variações de status e regimes para valores normalizados
 MAPEAMENTO_STATUS = {
@@ -695,6 +697,17 @@ class MyBot(discord.Client):
                                         print(f"   Status nao requer notificacao: {status}")
                                         logger.info(f"Status não requer notificação: {status}")
 
+                                    # Entrou/saiu de INATIVA/BAIXA/DEVOLVIDA (ou saiu de SUSPENSA
+                                    # sem ir para ATIVA): atualiza [#INATIVO]/[ENCERRADA]/[SUSPENSA]
+                                    # no Gestta. Os caminhos ->SUSPENSA e SUSPENSA->ATIVA já
+                                    # sincronizam via registrar/remover_empresa_suspensa.
+                                    anterior = pendente["dados"]["status_anterior"]
+                                    if ((status in STATUS_INATIVOS_GESTTA or anterior in STATUS_INATIVOS_GESTTA
+                                         or anterior == "SUSPENSA")
+                                            and status != "SUSPENSA"
+                                            and not (status == "ATIVA" and anterior == "SUSPENSA")):
+                                        self.sincronizar_gestta_codigo(codigo)
+
                                     # Remove da lista de pendentes e salva em disco
                                     del self.mudancas_pendentes[chave_pendente]
                                     salvar_mudancas_pendentes(self.mudancas_pendentes)
@@ -1076,8 +1089,8 @@ class MyBot(discord.Client):
         return f"{ano_iso}-W{semana_iso:02d}"
 
     def sincronizar_gestta_codigo(self, codigo):
-        """Atualiza (em background) a marcação [SUSPENSA] nos contatos do Gestta
-        que citam este código. Best-effort: nunca lança exceção para o chamador."""
+        """Atualiza (em background) as marcações [SUSPENSA]/[ENCERRADA]/[#INATIVO] nos
+        contatos do Gestta que citam este código. Best-effort: nunca lança exceção."""
         if not GESTTA_SYNC_ENABLED or messenger_gestta is None:
             return
 
@@ -1124,19 +1137,37 @@ class MyBot(discord.Client):
         embed = discord.Embed(
             title="⚠️ Sincronização com o Messenger (Gestta) falhou",
             description=(
-                "Não foi possível atualizar a marcação **[SUSPENSA]** nos contatos do "
+                "Não foi possível atualizar as marcações **[SUSPENSA]/[#INATIVO]** nos contatos do "
                 "Messenger. A causa mais provável é a **sessão do Onvio ter expirado**."
             ),
             color=0xF44336
         )
         embed.add_field(name="Empresa (código)", value=f"**{codigo}**", inline=True)
         embed.add_field(name="Data/Hora", value=datetime.now().strftime("%d/%m/%Y %H:%M:%S"), inline=True)
-        embed.add_field(
-            name="Ação necessária",
-            value="Rodar `scripts\\iniciar_chrome_gestta.bat`, fazer **login no Onvio** "
-                  "uma vez e fechar. Depois a renovação automática volta a funcionar.",
-            inline=False
-        )
+        # Credencial recusada e sessão expirada pedem ações OPOSTAS: relogar no
+        # Chrome não resolve senha errada, e mexer no .env não resolve sessão caída.
+        travado = ""
+        try:
+            import atualizar_token_gestta as _refresh
+            travado = _refresh.login_travado()
+        except Exception:  # noqa
+            pass
+        if travado:
+            embed.add_field(
+                name="⛔ Ação necessária — credencial recusada",
+                value="O Onvio **recusou a credencial** vezes seguidas e o login foi "
+                      "**travado de propósito**, para não bloquear a conta.\n"
+                      "1. Corrigir `GESTTA_ONVIO_EMAIL` / `SENHA` / `TOTP_SECRET` no `.env`\n"
+                      "2. Rodar `python atualizar_token_gestta.py --destravar`",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="Ação necessária",
+                value="Rodar `scripts\\iniciar_chrome_gestta.bat`, fazer **login no Onvio** "
+                      "uma vez e fechar. Depois a renovação automática volta a funcionar.",
+                inline=False
+            )
         embed.add_field(name="Detalhe técnico", value=f"```{str(motivo)[:300]}```", inline=False)
         embed.set_footer(text="Canella & Santos • Integração Gestta")
         try:
@@ -1149,6 +1180,31 @@ class MyBot(discord.Client):
         except Exception as e:  # noqa
             logger.error(f"Falha ao enviar alerta Gestta no Discord: {e}")
 
+    def _tratar_falha_token_gestta(self, motivo):
+        """Decide se uma falha de renovação merece alerta no Discord.
+
+        Uma renovação que falha NÃO significa integração parada: o token guardado
+        pode continuar válido por horas. Alertar nesse caso é ruído — cobra um
+        login manual que não é necessário. Só alerta quando o token atual já não
+        cobre a próxima operação (margem de 1h)."""
+        try:
+            import atualizar_token_gestta as _refresh
+            # Login travado sempre alerta, mesmo com token bom: exige ação humana
+            # (corrigir .env + --destravar) e o token vai vencer em horas. Silenciar
+            # aqui só adiaria a descoberta para quando a integração já estivesse parada.
+            if _refresh.login_travado():
+                logger.error(f"[Gestta] Login travado por recusa de credencial: {motivo}")
+            elif _refresh.token_valido(margem_seg=3600):
+                logger.warning(
+                    f"[Gestta] Renovação falhou, mas o token atual ainda é válido; "
+                    f"seguindo com ele. Nova tentativa no próximo ciclo. Detalhe: {motivo}"
+                )
+                return
+        except Exception as e:  # noqa
+            logger.error(f"[Gestta] Não foi possível checar a validade do token: {e}")
+        logger.error(f"[Gestta] Token: {motivo}")
+        self._agendar_alerta_gestta("token", motivo)
+
     async def manter_token_gestta(self):
         """Loop em background: renova o token do Gestta periodicamente (Chrome headless,
         SSO automático). Se falhar (sessão Onvio caiu), alerta no Discord."""
@@ -1160,15 +1216,18 @@ class MyBot(discord.Client):
         await asyncio.sleep(20)  # deixa o bot estabilizar
         while True:
             try:
-                ok, msg = await asyncio.to_thread(_refresh.renovar, launch=True, forcar=True)
+                # forcar=False: só faz login se o token guardado estiver vencendo
+                # (ver MARGEM_PADRAO_SEG). Antes era forcar=True, o que refazia o
+                # SSO a cada 6h mesmo com token de ~23h de validade — 4 logins/dia,
+                # 4 chances de falhar à toa.
+                ok, msg = await asyncio.to_thread(_refresh.renovar, launch=True, forcar=False)
                 if ok:
                     logger.info(f"[Gestta] Token: {msg}")
                 else:
-                    logger.error(f"[Gestta] Token: {msg}")
-                    self._agendar_alerta_gestta("token", msg)
+                    self._tratar_falha_token_gestta(msg)
             except Exception as e:  # noqa
                 logger.error(f"[Gestta] Erro no loop de renovação de token: {e}")
-                self._agendar_alerta_gestta("token", str(e))
+                self._tratar_falha_token_gestta(str(e))
             await asyncio.sleep(max(1, GESTTA_TOKEN_INTERVALO_H) * 3600)
 
     def _ler_ultima_reconciliacao(self):
@@ -1191,7 +1250,7 @@ class MyBot(discord.Client):
 
     async def reconciliacao_diaria_gestta(self):
         """Loop em background: 1x/dia varre todos os contatos e corrige as marcações
-        [SUSPENSA] conforme o estado atual das empresas.
+        [SUSPENSA]/[ENCERRADA]/[#INATIVO] conforme o estado atual das empresas.
 
         Roda quando já passou da hora configurada e ainda não rodou no dia — isso
         cobre o caso de o bot ter ficado desligado às 7h e subir depois (executa a
@@ -1212,17 +1271,18 @@ class MyBot(discord.Client):
                     self._salvar_ultima_reconciliacao(agora.date())
                     r = res.get("resumo", {})
                     logger.info(
-                        f"[Gestta] Reconciliação: add={r.get('add')} fmt={r.get('fmt')} "
-                        f"remove={r.get('remove')} pulados={r.get('skip_risk')} "
+                        f"[Gestta] Reconciliação: alterados={r.get('alterados')} "
+                        f"pulados={r.get('skip_risk')} revisar={r.get('revisar')} "
                         f"aplicados={r.get('aplicados')} erros={r.get('erros')}"
                     )
-                    await self._notificar_reconciliacao_gestta(r, catchup=catchup)
+                    await self._notificar_reconciliacao_gestta(
+                        r, catchup=catchup, revisar=res.get("revisar", []))
             except Exception as e:  # noqa
                 logger.error(f"[Gestta] Erro na reconciliação diária: {e}")
                 self._agendar_alerta_gestta("reconciliação diária", str(e))
             await asyncio.sleep(1800)  # verifica a cada 30 min
 
-    async def _notificar_reconciliacao_gestta(self, resumo, catchup=False):
+    async def _notificar_reconciliacao_gestta(self, resumo, catchup=False, revisar=None):
         """Posta no canal de alerta um resumo da varredura diária (sempre que roda)."""
         canal = (self.get_channel(GESTTA_ALERT_CHANNEL_ID)
                  or self.get_channel(DISCORD_SUSPENSE_CHANNEL_ID)
@@ -1235,14 +1295,33 @@ class MyBot(discord.Client):
         embed = discord.Embed(
             title=titulo,
             color=(0x4CAF50 if not erros else 0xFF9800),
-            description="Marcações **[SUSPENSA]** dos contatos sincronizadas com o estado atual das empresas."
+            description="Marcações **[SUSPENSA]**, **[ENCERRADA]** e **[#INATIVO]** dos contatos "
+                        "sincronizadas com o estado atual das empresas."
         )
-        embed.add_field(name="Adicionadas", value=str(resumo.get("add", 0)), inline=True)
-        embed.add_field(name="Reformatadas", value=str(resumo.get("fmt", 0)), inline=True)
-        embed.add_field(name="Removidas", value=str(resumo.get("remove", 0)), inline=True)
+
+        def _contagem(rot):
+            return (f"+{resumo.get(rot + '+', 0)} / -{resumo.get(rot + '-', 0)} "
+                    f"/ ~{resumo.get(rot + '~', 0)}")
+
+        embed.add_field(name="[SUSPENSA]", value=_contagem("suspensa"), inline=True)
+        embed.add_field(name="[#INATIVO]", value=_contagem("inativo"), inline=True)
+        embed.add_field(name="[ENCERRADA]", value=_contagem("encerrada"), inline=True)
+        embed.add_field(name="#INATIVO padronizado", value=str(resumo.get("normalizado", 0)), inline=True)
         embed.add_field(name="Aplicadas", value=str(resumo.get("aplicados", 0)), inline=True)
         embed.add_field(name="Puladas (arriscadas)", value=str(resumo.get("skip_risk", 0)), inline=True)
         embed.add_field(name="Erros", value=str(erros), inline=True)
+        if revisar:
+            linhas = [f"• {x.get('name', '')}" for x in revisar[:15]]
+            if len(revisar) > 15:
+                linhas.append(f"… e mais {len(revisar) - 15}")
+            embed.add_field(
+                name=f"⚠️ Revisar ({len(revisar)}) — #INATIVO manual com empresas ativas",
+                value=("Contatos com várias empresas, marcados **#INATIVO** à mão e com parte das "
+                       "empresas ativas: estão sendo **ignorados** pela automação. Se o #INATIVO era "
+                       "só por causa da empresa, remova-o (o bot põe [ENCERRADA]).\n"
+                       + "\n".join(linhas))[:1024],
+                inline=False
+            )
         embed.add_field(name="Data/Hora", value=datetime.now().strftime("%d/%m/%Y %H:%M:%S"), inline=False)
         embed.set_footer(text="Canella & Santos • Integração Gestta")
         try:

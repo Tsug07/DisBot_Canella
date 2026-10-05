@@ -42,7 +42,9 @@ Exemplos:
    ativa), atualiza na hora os contatos daquele código.
 2. **Varredura diária** — 1x/dia (padrão 07:00) revisa **todos** os contatos e corrige
    qualquer divergência (mudança fora do horário, marcação manual nova, etc.).
-3. **Renovação de token** — a cada 6h o bot renova sozinho o acesso ao Gestta.
+3. **Renovação de token** — a cada 6h o bot **verifica** o token e só refaz o login
+   no Onvio se ele estiver vencendo (menos de 8h de validade). Como o token dura
+   ~24h, na prática isso dá **um login por dia**, não quatro.
 
 Tudo roda **dentro do Gerson**, então é controlado e monitorado pelo card do Gerson no
 **DisC0ntrol** (start/stop/restart e logs).
@@ -75,6 +77,7 @@ Messenger, lê o token e fecha o Chrome. **Não digita senha.**
 | `GESTTA_RECONCILE_HORA` | `7` | Hora do dia (0–23) para a varredura completa. |
 | `GESTTA_JWT` | — | (Opcional) token fixo; tem prioridade sobre o arquivo. |
 | `GESTTA_CHROME_HOST` / `GESTTA_CHROME_PORT` | `127.0.0.1` / `9222` | Chrome de depuração (modo conexão). |
+| `GESTTA_CHROME_UA` | (Chrome 140 Win64) | User-agent do Chrome headless. Só mexa se o Auth0 passar a recusar a versão. |
 
 ---
 
@@ -107,14 +110,54 @@ python messenger_gestta.py --codigo 46 --apply
 
 REM Renovar o token manualmente (headless, SSO automático):
 python atualizar_token_gestta.py --launch --forcar
+
+REM Ver validade do token e estado da trava de login:
+python atualizar_token_gestta.py --status
+
+REM Liberar o login após corrigir a credencial no .env:
+python atualizar_token_gestta.py --destravar
 ```
+
+### Trava anti-bloqueio de conta
+
+Se o Onvio **recusar a credencial** 3 vezes seguidas, o login é **travado de
+propósito** e o Gerson para de tentar. Isso protege a conta: o Auth0 bloqueia após
+algumas tentativas, e aí nem a senha certa entra.
+
+Só conta como recusa quando o Auth0 exibe a mensagem de credencial inválida na tela.
+Falha de rede, Chrome que não subiu ou página lenta **não** contam — travar por causa
+delas deixaria a integração parada sem motivo. Um login bem-sucedido zera o contador.
+
+Para liberar: corrija `GESTTA_ONVIO_EMAIL` / `GESTTA_ONVIO_SENHA` /
+`GESTTA_ONVIO_TOTP_SECRET` no `.env` e rode `--destravar`.
+
+### Um login por vez
+
+O Chrome usa um perfil único (`C:\chrome_gestta`) e dois processos nele se atrapalham
+— o segundo simplesmente não sobe. As renovações são serializadas: dentro do bot por
+um lock em memória, e entre processos (bot × linha de comando) por
+`data/gestta_login_em_andamento.lock`, que expira em 10 min para não travar caso um
+processo morra no meio.
+
+Se aparecer `Outro processo esta renovando o token`, é isso: espere alguns instantes.
+
+### Validação do token
+
+Antes de gravar, o token novo é testado contra a API (`HTTP 200`). Um token que o
+servidor rejeita **não** substitui o anterior — o `exp` do JWT sozinho não detecta
+token revogado (troca de senha, sessão encerrada no Onvio).
 
 ---
 
 ## Como verificar que está funcionando
 
 - No `logs/bot_logs.log`, procure por `[Gestta]`:
-  - `[Gestta] Token: Token renovado (validade ~XXh)` — aparece no start e a cada 6h.
+  - `[Gestta] Token: Token atual ainda valido; nada a fazer.` — o esperado na maioria
+    das verificações de 6h (o token guardado foi reaproveitado).
+  - `[Gestta] Token: Token renovado (validade ~XXh)` — quando de fato refez o login
+    (~1x/dia).
+  - `[Gestta] Renovação falhou, mas o token atual ainda é válido` — aviso, **não** é
+    incidente: a integração segue funcionando e tentará de novo no próximo ciclo.
   - `[Gestta] Reconciliação: add=.. fmt=.. remove=.. aplicados=..` — aparece 1x/dia.
   - `[Gestta] sync código NNN: X contato(s) atualizado(s)` — no momento de uma mudança.
 - A data de modificação de `config/gestta_token.txt` muda a cada renovação.
