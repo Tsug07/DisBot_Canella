@@ -28,6 +28,10 @@ Bot_*/*.pid
 Bot_*/*.lock
 bip_bot.pid
 
+# Estado de runtime (específico de cada instalação)
+Bot_*/emails_processados.json
+Bot_*/procuracoes_estado.json
+
 # Arquivos de setup gerados localmente
 Bot_*/setup/*.log
 Bot_*/setup/temp/

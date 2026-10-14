@@ -8,9 +8,24 @@ import os
 import json
 import requests
 import csv
-from io import StringIO
+import hashlib
+from io import StringIO, BytesIO
 from datetime import datetime
 from difflib import SequenceMatcher
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import mm
+from reportlab.platypus import (
+    PageBreak,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 from dotenv import load_dotenv
 from config import get_logger
 import sys
@@ -37,6 +52,40 @@ SHEET_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=cs
 
 # === CONFIGURAÇÃO DO MAPEAMENTO DE RESPONSÁVEIS ===
 RESPONSAVEIS_JSON_PATH = BOT_DIR / "responsaveis_discord.json"
+
+# === CONFIGURAÇÃO DO CONTROLE "JÁ PROCESSEI" ===
+# O bot NÃO depende mais da flag de lido/não-lido do Gmail, porque qualquer
+# pessoa que abrisse o e-mail no Gmail fazia o bot nunca vê-lo (notificação
+# perdida em silêncio). Em vez disso, ele aplica uma label própria aos e-mails
+# que já processou e busca apenas os que ainda não têm essa label.
+GMAIL_LABEL_PROCESSADO = "DEC-processado"
+
+# Arquivo com os X-GM-MSGID já processados (rede de segurança caso a label
+# falhe ou seja removida manualmente). O X-GM-MSGID é estável, diferente do
+# ID de sequência IMAP, que muda quando a pasta muda.
+PROCESSADOS_JSON_PATH = BOT_DIR / "emails_processados.json"
+
+# Quantos IDs manter no histórico local (evita o arquivo crescer sem limite)
+MAX_HISTORICO_PROCESSADOS = 500
+
+# === CONFIGURAÇÃO DO AVISO DE PROCURAÇÕES (SEFAZ/RJ) ===
+# Segundo tipo de e-mail do fornecedor: relatório de procurações, enviado
+# quase todo dia com conteúdo praticamente igual. Notifica apenas o
+# @Legalização, com o relatório em PDF anexo.
+ASSUNTO_PROCURACOES = "Aviso de procurações - SEFAZ/RJ"
+
+# Seções do relatório que entram na notificação, na ordem de exibição.
+# As seções "recusadas" e "renunciadas" ficam de fora de propósito: somam
+# ~84 empresas de histórico e seriam mais ruído que ação.
+SECOES_PROCURACOES = [
+    "Procurações vencendo nos próximos 30 dias",
+    "Procurações pendentes de aceite",
+    "Procurações vencidas nos últimos 12 meses",
+]
+
+# Arquivo que guarda a "impressão digital" do último relatório enviado, para
+# só notificar quando alguma empresa entra ou sai das seções acompanhadas.
+PROCURACOES_ESTADO_PATH = BOT_DIR / "procuracoes_estado.json"
 
 # ID do cargo Legalização no Discord
 LEGALIZACAO_ROLE_ID = "1299045050881151006"
@@ -108,6 +157,52 @@ def remover_lockfile():
 # ------------------------------------------
 # FUNÇÕES PARA CARREGAR PLANILHA E MAPEAMENTO
 # ------------------------------------------
+def carregar_processados():
+    """
+    Carrega do disco o conjunto de X-GM-MSGID já processados.
+
+    Rede de segurança do controle "já processei": se a label do Gmail falhar
+    ou for removida à mão, este histórico impede o reenvio das notificações.
+    """
+    try:
+        if PROCESSADOS_JSON_PATH.exists():
+            with open(PROCESSADOS_JSON_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                ids = set(data.get("processados", []))
+                logger.info(f"Histórico local carregado: {len(ids)} e-mail(s) já processado(s)")
+                return ids
+        logger.info("Histórico local ainda não existe - será criado no primeiro processamento")
+        return set()
+    except Exception as e:
+        logger.error(f"Erro ao carregar histórico de processados: {e}")
+        # Em caso de erro retorna vazio: a label do Gmail continua protegendo
+        # contra reprocessamento, então o pior caso é um reenvio, não um silêncio.
+        return set()
+
+
+def salvar_processados(msgids):
+    """
+    Grava no disco os X-GM-MSGID já processados, mantendo apenas os mais
+    recentes (MAX_HISTORICO_PROCESSADOS) para o arquivo não crescer sem limite.
+    """
+    try:
+        ids = list(msgids)[-MAX_HISTORICO_PROCESSADOS:]
+        with open(PROCESSADOS_JSON_PATH, 'w', encoding='utf-8') as f:
+            json.dump(
+                {
+                    "_descricao": "X-GM-MSGID dos e-mails DEC já processados pelo bot. "
+                                  "Não editar à mão; apagar este arquivo pode causar reenvio.",
+                    "atualizado_em": datetime.now().strftime('%d/%m/%Y %H:%M:%S'),
+                    "processados": ids,
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+    except Exception as e:
+        logger.error(f"Erro ao salvar histórico de processados: {e}")
+
+
 def carregar_mapeamento_discord():
     """Carrega o mapeamento de responsáveis para IDs do Discord do arquivo JSON."""
     global responsavel_discord_cache
@@ -143,9 +238,11 @@ def carregar_planilha_empresas():
             if idx == 0:
                 continue
 
+            # Colunas da planilha: A=Nº, B=EMPRESA, C=SITUAÇÃO,
+            #                      D=PESSOAL, E=FISCAL, F=CONTÁBIL, G=LEGALIZA/CONTROLE
             # Coluna B (índice 1) = Nome da empresa
             # Coluna C (índice 2) = Situação da empresa
-            # Coluna E (índice 4) = Responsável
+            # Coluna E (índice 4) = Responsável FISCAL (usado para notificações do DEC)
             if len(row) >= 5:
                 empresa = row[1].strip().upper() if row[1] else ""
                 situacao = row[2].strip().upper() if len(row) > 2 and row[2] else ""
@@ -296,8 +393,13 @@ def format_date_br(date_string):
         # Remove espaços extras
         date_string = date_string.strip()
 
-        # Tenta detectar e converter diferentes formatos
-        # Formato: YYYY-MM-DD HH:MM:SS ou YYYY/MM/DD HH:MM:SS (padrão americano)
+        # IMPORTANTE: o DEC-SEFAZ já envia as datas em DD/MM/YYYY.
+        # Esta checagem vem PRIMEIRO porque uma data como "04/08/2026" também
+        # casaria com '%m/%d/%Y' e seria invertida para 08/04/2026.
+        if re.match(r'\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}', date_string):
+            return date_string
+
+        # Outros formatos (ISO/americano), convertidos para o padrão BR
         for fmt in ['%Y-%m-%d %H:%M:%S', '%Y/%m/%d %H:%M:%S', '%m/%d/%Y %H:%M:%S']:
             try:
                 dt = datetime.strptime(date_string, fmt)
@@ -305,15 +407,28 @@ def format_date_br(date_string):
             except ValueError:
                 continue
 
-        # Se já estiver no formato DD/MM/YYYY HH:MM:SS, retorna como está
-        if re.match(r'\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}:\d{2}', date_string):
-            return date_string
-
         # Se não conseguiu converter, retorna o original
         return date_string
     except Exception as e:
         logger.warning(f"Erro ao formatar data '{date_string}': {e}")
         return date_string
+
+
+# ------------------------------------------
+# FUNÇÃO PARA EXTRAIR UM CAMPO DA TABELA DE NOTIFICAÇÃO
+# ------------------------------------------
+def buscar_campo(label, table_html):
+    """
+    Extrai o valor de um campo da tabela de notificação.
+
+    Tolera as duas formas já enviadas pelo fornecedor (OCF):
+    - '<b>Categoria: </b>AVISO'  (formato até jan/2026)
+    - '<b>Categoria:</b> AVISO'  (formato atual - os dois-pontos colaram na tag)
+    """
+    return re.search(
+        r'<b>\s*' + re.escape(label) + r'\s*:?\s*</b>\s*:?\s*([^<]+)',
+        table_html
+    )
 
 
 # ------------------------------------------
@@ -336,7 +451,7 @@ def extract_all_notifications(body):
     # Extrai apenas a seção de mensagens NÃO LIDAS
     # Procura o conteúdo entre "Mensagens não lidas" e o separador de asteriscos
     unread_section_match = re.search(
-        r'Mensagens não lidas dos últimos 90 dias:</h3>(.*?)(?:\*{10,}|Mensagens lidas dos últimos 90 dias:)',
+        r'Mensagens não lidas dos últimos 90 dias:\s*</h[1-6]>(.*?)(?:\*{10,}|Mensagens lidas dos últimos 90 dias:)',
         body,
         re.DOTALL
     )
@@ -349,8 +464,9 @@ def extract_all_notifications(body):
     unread_body = unread_section_match.group(1)
     logger.info(f"Seção de mensagens não lidas extraída ({len(unread_body)} caracteres)")
 
-    # Encontra todos os blocos que começam com CNPJ dentro de <h4>
-    cnpj_pattern = r'<h4>CNPJ:\s*([\d./-]+)\s*\|\s*Cliente:\s*([^<]+)'
+    # Encontra todos os blocos que começam com CNPJ dentro de <h3> ou <h4>
+    # O fornecedor (OCF) já enviou os dois formatos: <h4> até jan/2026, <h3> depois.
+    cnpj_pattern = r'<h[34]>CNPJ:\s*([\d./-]+)\s*\|\s*Cliente:\s*([^<]+)'
     cnpj_matches = list(re.finditer(cnpj_pattern, unread_body))
     
     for i, cnpj_match in enumerate(cnpj_matches):
@@ -375,11 +491,11 @@ def extract_all_notifications(body):
             table_html = table_match.group(0)
             
             # Extrai os dados de cada campo da tabela
-            data_hora_match = re.search(r'<b>Data e Hora envio:\s*</b>([^<]+)', table_html)
-            tipo_receita_match = re.search(r'<b>Tipo de Receita:\s*</b>([^<]+)', table_html)
-            categoria_match = re.search(r'<b>Categoria:\s*</b>([^<]+)', table_html)
-            tipo_mensagem_match = re.search(r'<b>Tipo de Mensagem:\s*</b>([^<]+)', table_html)
-            assunto_match = re.search(r'<b>Assunto:\s*</b>([^<]+)', table_html)
+            data_hora_match = buscar_campo('Data e Hora envio', table_html)
+            tipo_receita_match = buscar_campo('Tipo de Receita', table_html)
+            categoria_match = buscar_campo('Categoria', table_html)
+            tipo_mensagem_match = buscar_campo('Tipo de Mensagem', table_html)
+            assunto_match = buscar_campo('Assunto', table_html)
             
             # Verifica se todos os campos foram encontrados
             if all([data_hora_match, tipo_receita_match, categoria_match,
@@ -403,6 +519,258 @@ def extract_all_notifications(body):
     return notifications
 
 # ------------------------------------------
+# FUNÇÕES DO AVISO DE PROCURAÇÕES (SEFAZ/RJ)
+# ------------------------------------------
+def extrair_procuracoes(body):
+    """
+    Extrai as seções do relatório de procurações do corpo HTML.
+
+    O e-mail tem o formato:
+        <h3>Procurações vencendo nos próximos 30 dias</h3>
+        <table><thead>...CNPJ|Nome|Validade...</thead>
+               <tbody><tr><td>CNPJ</td><td>Nome</td><td>Validade</td></tr>...</tbody></table>
+        <hr>
+        <h3>Procurações pendentes de aceite</h3>
+        ...
+
+    Quando uma seção não tem dados, traz "Nenhuma procuração encontrada".
+
+    Retorna um dict {nome_da_secao: [(cnpj, nome, validade), ...]} contendo
+    apenas as seções listadas em SECOES_PROCURACOES.
+    """
+    secoes = {}
+
+    for titulo in SECOES_PROCURACOES:
+        # Pega o conteúdo entre este <h3> e o próximo <hr> (fim da seção).
+        # re.escape no título por causa dos acentos e caracteres especiais.
+        trecho = re.search(
+            r'<h3>\s*' + re.escape(titulo) + r'\s*</h3>(.*?)(?:<hr>|</body>)',
+            body,
+            re.DOTALL | re.IGNORECASE,
+        )
+
+        if not trecho:
+            logger.debug(f"Seção de procurações não encontrada: '{titulo}'")
+            secoes[titulo] = []
+            continue
+
+        linhas = re.findall(
+            r'<tr>\s*<td>([\d./-]+)</td>\s*<td>([^<]*)</td>\s*<td>([^<]*)</td>\s*</tr>',
+            trecho.group(1),
+        )
+
+        secoes[titulo] = [
+            (cnpj.strip(), nome.strip(), validade.strip())
+            for cnpj, nome, validade in linhas
+        ]
+
+    return secoes
+
+
+def calcular_hash_procuracoes(secoes):
+    """
+    Gera uma impressão digital do conteúdo das seções acompanhadas.
+
+    Serve para detectar mudança real: se nenhuma empresa entrou nem saiu
+    das seções, o hash é igual e o bot não notifica de novo (o e-mail chega
+    quase todo dia com o mesmo conteúdo).
+    """
+    partes = []
+    for titulo in SECOES_PROCURACOES:
+        for cnpj, nome, validade in sorted(secoes.get(titulo, [])):
+            partes.append(f"{titulo}|{cnpj}|{nome}|{validade}")
+    conteudo = "\n".join(partes)
+    return hashlib.sha256(conteudo.encode("utf-8")).hexdigest()
+
+
+def carregar_estado_procuracoes():
+    """Carrega o hash e as empresas do último relatório de procurações enviado."""
+    try:
+        if PROCURACOES_ESTADO_PATH.exists():
+            with open(PROCURACOES_ESTADO_PATH, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {}
+    except Exception as e:
+        logger.error(f"Erro ao carregar estado das procurações: {e}")
+        return {}
+
+
+def salvar_estado_procuracoes(hash_atual, secoes):
+    """Grava o hash e as chaves das empresas do relatório recém-enviado."""
+    try:
+        chaves = {
+            titulo: sorted(f"{c}|{v}" for c, _, v in secoes.get(titulo, []))
+            for titulo in SECOES_PROCURACOES
+        }
+        with open(PROCURACOES_ESTADO_PATH, 'w', encoding='utf-8') as f:
+            json.dump(
+                {
+                    "_descricao": "Estado do último aviso de procurações enviado ao "
+                                  "Discord. Usado para notificar só quando há mudança.",
+                    "atualizado_em": datetime.now().strftime('%d/%m/%Y %H:%M:%S'),
+                    "hash": hash_atual,
+                    "empresas_por_secao": chaves,
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
+    except Exception as e:
+        logger.error(f"Erro ao salvar estado das procurações: {e}")
+
+
+def comparar_procuracoes(secoes):
+    """
+    Compara o relatório atual com o último enviado.
+
+    Retorna (houve_mudanca, resumo_das_diferencas), onde o resumo lista
+    quantas empresas entraram e saíram de cada seção.
+    """
+    estado = carregar_estado_procuracoes()
+    hash_atual = calcular_hash_procuracoes(secoes)
+
+    if not estado:
+        return True, ["Primeiro relatório de procurações enviado"]
+
+    if estado.get("hash") == hash_atual:
+        return False, []
+
+    anterior = estado.get("empresas_por_secao", {})
+    diferencas = []
+
+    for titulo in SECOES_PROCURACOES:
+        antes = set(anterior.get(titulo, []))
+        agora = {f"{c}|{v}" for c, _, v in secoes.get(titulo, [])}
+
+        entraram = agora - antes
+        sairam = antes - agora
+
+        if entraram or sairam:
+            partes = []
+            if entraram:
+                partes.append(f"+{len(entraram)}")
+            if sairam:
+                partes.append(f"-{len(sairam)}")
+            diferencas.append(f"{titulo}: {' / '.join(partes)}")
+
+    return True, diferencas or ["Dados atualizados"]
+
+
+def gerar_pdf_procuracoes(secoes, data_email):
+    """
+    Monta o relatório de procurações em PDF e devolve os bytes.
+
+    Uma tabela por seção, com cabeçalho repetido quando a tabela quebra
+    entre páginas. Retorna None se a geração falhar, para que o bot possa
+    cair no resumo em texto em vez de não avisar nada.
+    """
+    try:
+        buffer = BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            leftMargin=15 * mm,
+            rightMargin=15 * mm,
+            topMargin=15 * mm,
+            bottomMargin=15 * mm,
+            title="Aviso de Procurações - SEFAZ/RJ",
+            author="Bot Rebecca",
+        )
+
+        estilos = getSampleStyleSheet()
+        estilo_titulo = ParagraphStyle(
+            "TituloRelatorio",
+            parent=estilos["Title"],
+            fontSize=16,
+            spaceAfter=2 * mm,
+        )
+        estilo_sub = ParagraphStyle(
+            "SubTitulo",
+            parent=estilos["Normal"],
+            fontSize=9,
+            alignment=TA_CENTER,
+            textColor=colors.HexColor("#555555"),
+            spaceAfter=6 * mm,
+        )
+        estilo_secao = ParagraphStyle(
+            "TituloSecao",
+            parent=estilos["Heading2"],
+            fontSize=12,
+            spaceBefore=4 * mm,
+            spaceAfter=2 * mm,
+            textColor=colors.HexColor("#1F3864"),
+        )
+        estilo_celula = ParagraphStyle(
+            "Celula", parent=estilos["Normal"], fontSize=8, leading=10
+        )
+        estilo_vazio = ParagraphStyle(
+            "Vazio",
+            parent=estilos["Normal"],
+            fontSize=9,
+            textColor=colors.HexColor("#777777"),
+            spaceAfter=3 * mm,
+        )
+
+        elementos = [
+            Paragraph("Aviso de Procurações - SEFAZ/RJ", estilo_titulo),
+            Paragraph(
+                f"CANELLA &amp; SANTOS CONTABILIDADE EIRELI<br/>"
+                f"Relatório do e-mail de {data_email} &nbsp;|&nbsp; "
+                f"Gerado em {datetime.now().strftime('%d/%m/%Y às %H:%M')}",
+                estilo_sub,
+            ),
+        ]
+
+        for titulo in SECOES_PROCURACOES:
+            linhas = secoes.get(titulo, [])
+            elementos.append(
+                Paragraph(f"{titulo} ({len(linhas)})", estilo_secao)
+            )
+
+            if not linhas:
+                elementos.append(
+                    Paragraph("Nenhuma procuração nesta situação.", estilo_vazio)
+                )
+                continue
+
+            dados = [["CNPJ", "Empresa", "Validade"]]
+            for cnpj, nome, validade in linhas:
+                dados.append([
+                    Paragraph(cnpj, estilo_celula),
+                    Paragraph(nome, estilo_celula),
+                    Paragraph(validade, estilo_celula),
+                ])
+
+            tabela = Table(
+                dados,
+                colWidths=[34 * mm, 112 * mm, 24 * mm],
+                repeatRows=1,  # repete o cabeçalho ao quebrar a página
+            )
+            tabela.setStyle(TableStyle([
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1F3864")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 9),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#999999")),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("ALIGN", (2, 1), (2, -1), "CENTER"),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1),
+                 [colors.white, colors.HexColor("#F2F2F2")]),
+                ("TOPPADDING", (0, 0), (-1, -1), 3),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+            ]))
+            elementos.append(tabela)
+            elementos.append(Spacer(1, 3 * mm))
+
+        doc.build(elementos)
+        return buffer.getvalue()
+
+    except Exception as e:
+        logger.error(f"Erro ao gerar PDF das procurações: {e}")
+        return None
+
+
+# ------------------------------------------
 # FUNÇÃO PARA LER OS E-MAILS DA PASTA DEC
 # ------------------------------------------
 def check_emails():
@@ -415,22 +783,57 @@ def check_emails():
         mail.select("DEC")
         logger.info("Pasta 'DEC' selecionada")
 
-        # Busca apenas emails não lidos
-        result, data = mail.search(None, "UNSEEN")
+        # Busca os e-mails que o bot ainda NÃO processou.
+        # Usa a ausência da label própria, e não a flag de não-lido: assim
+        # alguém abrir o e-mail no Gmail não faz o bot deixar de processá-lo.
+        result, data = mail.search(
+            None, 'X-GM-RAW', f'"-label:{GMAIL_LABEL_PROCESSADO}"'
+        )
         email_ids = data[0].split()
-        
-        logger.info(f"Total de e-mails não lidos na pasta DEC: {len(email_ids)}")
+
+        logger.info(f"Total de e-mails ainda não processados na pasta DEC: {len(email_ids)}")
+
+        # Histórico local como segunda barreira contra reprocessamento
+        ja_processados = carregar_processados()
 
         all_notifications = []
+        # Relatórios de procurações encontrados (segundo tipo de e-mail)
+        avisos_procuracoes = []
+        # (id_sequencia, msgid) dos e-mails processados, para receberem
+        # a label DEPOIS que as notificações forem enviadas ao Discord.
+        processed_ids = []
 
         for idx, eid in enumerate(email_ids, 1):
-            res, msg = mail.fetch(eid, "(RFC822)")
+            # BODY.PEEK[] em vez de RFC822: não altera a flag de lido.
+            # X-GM-MSGID vem junto para identificar o e-mail de forma estável.
+            res, msg = mail.fetch(eid, "(X-GM-MSGID BODY.PEEK[])")
+
+            # Extrai o X-GM-MSGID da resposta (vem nos metadados, não no corpo)
+            msgid = None
+            for response in msg:
+                meta = response[0] if isinstance(response, tuple) else response
+                if meta:
+                    m_id = re.search(rb'X-GM-MSGID\s+(\d+)', meta)
+                    if m_id:
+                        msgid = m_id.group(1).decode()
+                        break
+
+            # Se o histórico local já conhece este e-mail, apenas reaplica a
+            # label (que deve ter sido perdida) e segue sem reenviar nada.
+            if msgid and msgid in ja_processados:
+                logger.info(
+                    f"[{idx}] E-mail já consta no histórico local (msgid {msgid}) "
+                    f"- reaplicando label, sem reenviar"
+                )
+                processed_ids.append((eid, msgid))
+                continue
+
             for response in msg:
                 if isinstance(response, tuple):
                     msg_email = email.message_from_bytes(response[1])
                     subject = decode(msg_email["Subject"])
                     sender = msg_email["From"]
-                    
+
                     logger.debug(f"[{idx}] De: {sender} | Assunto: {subject}")
 
                     # Conteúdo do email (prioriza HTML para extrair as seções corretamente)
@@ -450,6 +853,7 @@ def check_emails():
                     # Verifica se é um e-mail DEC-SEFAZ
                     if "Aviso de mensagens - Consulta DEC-SEFAZ/RJ" in subject:
                         logger.info(f">> Email DEC-SEFAZ encontrado! Processando...")
+                        processed_ids.append((eid, msgid))
 
                         # Extrai TODAS as notificações do corpo do e-mail
                         notifications = extract_all_notifications(body)
@@ -462,16 +866,173 @@ def check_emails():
                                 all_notifications.append(notif)
                         else:
                             logger.warning(f">> E-mail DEC-SEFAZ nao contem notificacoes no padrao esperado")
+
+                    # Verifica se é o aviso de procurações
+                    elif ASSUNTO_PROCURACOES in subject:
+                        logger.info(f">> Email de PROCURAÇÕES encontrado! Processando...")
+                        processed_ids.append((eid, msgid))
+
+                        secoes = extrair_procuracoes(body)
+                        total = sum(len(v) for v in secoes.values())
+
+                        if total:
+                            for titulo in SECOES_PROCURACOES:
+                                logger.info(f"   -> {titulo}: {len(secoes.get(titulo, []))}")
+                            avisos_procuracoes.append({
+                                'secoes': secoes,
+                                'data_email': msg_email["Date"] or "",
+                            })
+                        else:
+                            logger.warning(
+                                ">> E-mail de procurações sem dados nas seções acompanhadas"
+                            )
                     else:
                         logger.debug(f"E-mail descartado - assunto não corresponde")
 
         mail.logout()
         logger.info(f"Total de notificações para enviar ao Discord: {len(all_notifications)}")
-        return all_notifications
-    
+        if avisos_procuracoes:
+            logger.info(f"Avisos de procurações para processar: {len(avisos_procuracoes)}")
+        return all_notifications, processed_ids, avisos_procuracoes
+
     except Exception as e:
         logger.error(f"Erro ao verificar e-mails: {str(e)}")
-        return []
+        return [], [], []
+
+
+# ------------------------------------------
+# FUNÇÃO PARA MARCAR E-MAILS COMO PROCESSADOS
+# ------------------------------------------
+def marcar_como_processados(processed_ids):
+    """
+    Marca os e-mails como processados pelo bot, de duas formas independentes:
+
+    1. Aplica a label GMAIL_LABEL_PROCESSADO no Gmail (critério da busca)
+    2. Grava o X-GM-MSGID no histórico local (rede de segurança)
+
+    Também marca como lido, para manter a pasta visualmente organizada - mas,
+    diferente de antes, a flag de lido NÃO é mais o que controla o
+    reprocessamento, então alguém abrir o e-mail não causa nenhum efeito.
+
+    Chamada somente DEPOIS do envio ao Discord, para que uma falha de envio
+    não faça as notificações serem perdidas silenciosamente.
+    """
+    if not processed_ids:
+        return
+
+    # Grava o histórico local primeiro: é a barreira que sobrevive a falhas
+    # de rede no Gmail e garante que nada seja reenviado.
+    msgids = [mid for _, mid in processed_ids if mid]
+    if msgids:
+        historico = carregar_processados()
+        historico.update(msgids)
+        salvar_processados(historico)
+        logger.info(f">> {len(msgids)} e-mail(s) registrado(s) no histórico local")
+
+    try:
+        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail.login(GMAIL_USER, GMAIL_PASS)
+        mail.select("DEC")
+
+        for eid, _ in processed_ids:
+            # X-GM-LABELS cria a label automaticamente se ela não existir
+            mail.store(eid, '+X-GM-LABELS', GMAIL_LABEL_PROCESSADO)
+            mail.store(eid, '+FLAGS', '\\Seen')
+
+        mail.logout()
+        logger.info(
+            f">> {len(processed_ids)} e-mail(s) marcado(s) com a label "
+            f"'{GMAIL_LABEL_PROCESSADO}'"
+        )
+
+    except Exception as e:
+        # O histórico local já foi gravado acima, então mesmo com esta falha
+        # o e-mail não será reprocessado: a label é reaplicada no próximo ciclo.
+        logger.error(f"Erro ao aplicar label nos e-mails: {str(e)}")
+
+
+# ------------------------------------------
+# ENVIO DO AVISO DE PROCURAÇÕES AO DISCORD
+# ------------------------------------------
+async def enviar_aviso_procuracoes(channel, secoes, data_email):
+    """
+    Envia o relatório de procurações ao Discord como PDF anexo,
+    mencionando apenas o @Legalização.
+
+    Só envia quando há mudança real em relação ao último relatório, porque o
+    e-mail chega quase todo dia com o mesmo conteúdo.
+    """
+    houve_mudanca, diferencas = comparar_procuracoes(secoes)
+
+    if not houve_mudanca:
+        logger.info(">> Procurações sem mudança desde o último aviso - nada enviado")
+        return False
+
+    # Formata a data do e-mail para exibição
+    data_formatada = data_email
+    try:
+        from email.utils import parsedate_to_datetime
+        data_formatada = parsedate_to_datetime(data_email).strftime('%d/%m/%Y')
+    except Exception:
+        data_formatada = datetime.now().strftime('%d/%m/%Y')
+
+    vencendo = len(secoes.get(SECOES_PROCURACOES[0], []))
+    pendentes = len(secoes.get(SECOES_PROCURACOES[1], []))
+    vencidas = len(secoes.get(SECOES_PROCURACOES[2], []))
+
+    embed = discord.Embed(
+        title="📄 Aviso de Procurações - SEFAZ/RJ",
+        description=(
+            "Relatório de procurações em anexo (PDF).\n"
+            f"*Alterações desde o último aviso: {'; '.join(diferencas)}*"
+        ),
+        color=discord.Color.blue(),
+    )
+    embed.add_field(name="⏳ Vencendo em 30 dias", value=str(vencendo), inline=True)
+    embed.add_field(name="✍️ Pendentes de aceite", value=str(pendentes), inline=True)
+    embed.add_field(name="⚠️ Vencidas (12 meses)", value=str(vencidas), inline=True)
+    embed.set_footer(text=f"E-mail de {data_formatada}")
+
+    pdf_bytes = gerar_pdf_procuracoes(secoes, data_formatada)
+    mencao = f"<@&{LEGALIZACAO_ROLE_ID}>"
+
+    try:
+        if pdf_bytes:
+            nome_arquivo = (
+                f"procuracoes_{datetime.now().strftime('%d-%m-%Y')}.pdf"
+            )
+            arquivo = discord.File(BytesIO(pdf_bytes), filename=nome_arquivo)
+            await channel.send(mencao, embed=embed, file=arquivo)
+            logger.info(
+                f">> Aviso de procurações enviado com PDF ({len(pdf_bytes)} bytes)"
+            )
+        else:
+            # Sem o PDF, avisa de todo modo: melhor um resumo que silêncio
+            embed.description = (
+                "⚠️ Não foi possível gerar o PDF - veja o resumo abaixo.\n"
+                f"*Alterações: {'; '.join(diferencas)}*"
+            )
+            for titulo in SECOES_PROCURACOES:
+                linhas = secoes.get(titulo, [])
+                if linhas:
+                    texto = "\n".join(
+                        f"• {nome} — vence {validade}"
+                        for _, nome, validade in linhas[:10]
+                    )
+                    if len(linhas) > 10:
+                        texto += f"\n*... e mais {len(linhas) - 10}*"
+                    embed.add_field(name=titulo, value=texto[:1024], inline=False)
+            await channel.send(mencao, embed=embed)
+            logger.warning(">> Aviso de procurações enviado SEM PDF (fallback)")
+
+        # Só grava o estado após o envio dar certo, para que uma falha de
+        # rede não faça o aviso ser perdido silenciosamente.
+        salvar_estado_procuracoes(calcular_hash_procuracoes(secoes), secoes)
+        return True
+
+    except Exception as e:
+        logger.error(f"Erro ao enviar aviso de procurações: {e}")
+        return False
 
 
 # ------------------------------------------
@@ -485,11 +1046,19 @@ async def email_monitor():
             logger.error(f"Canal Discord com ID {CHANNEL_ID} não encontrado")
             return
 
-        notifications = check_emails()
+        notifications, processed_ids, avisos_procuracoes = check_emails()
 
         logger.info(f">> Total de notificacoes coletadas: {len(notifications)}")
 
+        # Processa o aviso de procurações (independente das notificações do DEC)
+        for aviso in avisos_procuracoes:
+            await enviar_aviso_procuracoes(
+                channel, aviso['secoes'], aviso['data_email']
+            )
+
         if not notifications:
+            # Marca e-mails sem notificações pendentes para não reprocessar
+            marcar_como_processados(processed_ids)
             return
 
         # Agrupa notificações por CNPJ (empresa)
@@ -611,6 +1180,11 @@ async def email_monitor():
             logger.info(f">> Empresas ignoradas por status negativo: {len(empresas_ignoradas)}")
             for empresa, status in empresas_ignoradas:
                 logger.info(f"   -> {empresa}: {status}")
+
+        # Só marca como processado após o envio ao Discord ter concluído com
+        # sucesso. Se algo acima falhar, a exceção abaixo impede a marcação e o
+        # e-mail continua sem a label, para ser reprocessado no próximo ciclo.
+        marcar_como_processados(processed_ids)
 
     except Exception as e:
         logger.error(f"Erro na tarefa de monitoramento: {str(e)}")
