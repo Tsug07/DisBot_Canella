@@ -2,7 +2,7 @@ import discord
 from discord.ext import tasks, commands
 import imaplib
 import email
-from email.header import decode_header
+from email.header import decode_header, make_header
 import re
 import os
 import json
@@ -95,6 +95,18 @@ FABIANA_USER_ID = "1285344147292684359"
 
 # ID do Hugo (para receber relatório de empresas sem responsável)
 HUGO_USER_ID = "1285316758009544844"
+
+# Limites do Discord para embeds: 25 fields e 6000 caracteres no total.
+# Uma empresa com muitas notificações estourava o limite e o envio falhava
+# com "400 Bad Request: Must be 25 or fewer in length".
+EMBED_MAX_FIELDS = 25
+EMBED_MAX_CHARS = 5800  # margem abaixo de 6000
+
+# Quantas vezes um mesmo lote de e-mails pode falhar inteiro antes de ser
+# marcado como processado mesmo assim. Sem esse limite, um erro que se repete
+# sempre (ex.: limite do Discord) faz o bot reenviar o lote a cada ciclo.
+MAX_TENTATIVAS_LOTE = 3
+tentativas_lote = {}  # frozenset(msgids) -> nº de tentativas falhas
 
 # Cache dos dados da planilha (empresa -> {responsavel, situacao})
 empresa_responsavel_cache = {}
@@ -372,11 +384,11 @@ bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 # FUNÇÃO PARA DECODIFICAR TEXTOS DE E-MAIL
 # ------------------------------------------
 def decode(string):
+    # Junta todos os pedaços do cabeçalho: o assunto do aviso de procurações
+    # vem como "Aviso de =?utf-8?q?procura=C3=A7=C3=B5es?= - SEFAZ/RJ", e ler
+    # só o primeiro pedaço devolvia "Aviso de ", que nunca batia com o filtro.
     try:
-        text, enc = decode_header(string)[0]
-        if isinstance(text, bytes):
-            return text.decode(enc or "utf-8", errors="ignore")
-        return text
+        return str(make_header(decode_header(string)))
     except:
         return string
 
@@ -1035,6 +1047,56 @@ async def enviar_aviso_procuracoes(channel, secoes, data_email):
         return False
 
 
+def montar_embeds_empresa(cliente, cnpj, notifs):
+    """Monta um ou mais embeds para a empresa, respeitando os limites do Discord."""
+    def novo_embed(parte):
+        titulo = "🚨 Notificações SEFAZ/RJ"
+        if parte > 1:
+            titulo += f" (continuação {parte})"
+        embed = discord.Embed(
+            title=titulo,
+            description=f"Rebecca identificou **{len(notifs)}** notificação(ões) fiscal(is).",
+            color=discord.Color.red(),
+        )
+        embed.add_field(name="🏢 Cliente", value=cliente, inline=False)
+        embed.add_field(name="📋 CNPJ", value=cnpj, inline=False)
+        return embed
+
+    embeds = [novo_embed(1)]
+    for idx, n in enumerate(notifs, 1):
+        nome = f"Notificação {idx}"
+        detalhes = (
+            f"📅 {n['data_hora']}\n"
+            f"💰 {n['tipo_receita']} | ⚠️ {n['categoria']} | 📝 {n['tipo_mensagem']}\n"
+            f"📌 {n['assunto_notificacao']}"
+        )[:1024]
+        atual = embeds[-1]
+        if (len(atual.fields) >= EMBED_MAX_FIELDS
+                or len(atual) + len(nome) + len(detalhes) > EMBED_MAX_CHARS):
+            atual = novo_embed(len(embeds) + 1)
+            embeds.append(atual)
+        atual.add_field(name=nome, value=detalhes, inline=False)
+    return embeds
+
+
+def remover_notificacoes_duplicadas(notifications):
+    """Remove notificações repetidas entre e-mails do mesmo lote.
+
+    O aviso do DEC repete todo dia as mensagens ainda não lidas; quando o bot
+    fica parado por alguns dias, os e-mails acumulados trazem as mesmas
+    notificações várias vezes.
+    """
+    vistas = set()
+    unicas = []
+    for n in notifications:
+        chave = (n['cnpj'], n['data_hora'], n['tipo_receita'], n['categoria'],
+                 n['tipo_mensagem'], n['assunto_notificacao'])
+        if chave not in vistas:
+            vistas.add(chave)
+            unicas.append(n)
+    return unicas
+
+
 # ------------------------------------------
 # TAREFA AUTOMÁTICA DE CHECAR GMAIL
 # ------------------------------------------
@@ -1061,6 +1123,11 @@ async def email_monitor():
             marcar_como_processados(processed_ids)
             return
 
+        total_antes = len(notifications)
+        notifications = remover_notificacoes_duplicadas(notifications)
+        if len(notifications) < total_antes:
+            logger.info(f">> {total_antes - len(notifications)} notificação(ões) duplicada(s) removida(s)")
+
         # Agrupa notificações por CNPJ (empresa)
         empresas_agrupadas = {}
         for notif in notifications:
@@ -1082,6 +1149,7 @@ async def email_monitor():
 
         enviadas = 0
         empresas_sem_responsavel = []
+        empresas_com_falha = []
 
         empresas_ignoradas = []
 
@@ -1104,30 +1172,7 @@ async def email_monitor():
                 for n in notifs
             )
 
-            # Cria o embed principal
-            embed = discord.Embed(
-                title="🚨 Notificações SEFAZ/RJ",
-                description=f"Rebecca identificou **{len(notifs)}** notificação(ões) fiscal(is).",
-                color=discord.Color.red(),
-            )
-
-            # Informações da empresa
-            embed.add_field(name="🏢 Cliente", value=cliente, inline=False)
-            embed.add_field(name="📋 CNPJ", value=cnpj, inline=False)
-
-            # Lista cada notificação
-            for idx, n in enumerate(notifs, 1):
-                # Formata os detalhes da notificação
-                detalhes = (
-                    f"📅 {n['data_hora']}\n"
-                    f"💰 {n['tipo_receita']} | ⚠️ {n['categoria']} | 📝 {n['tipo_mensagem']}\n"
-                    f"📌 {n['assunto_notificacao']}"
-                )
-                embed.add_field(
-                    name=f"Notificação {idx}",
-                    value=detalhes,
-                    inline=False
-                )
+            embeds = montar_embeds_empresa(cliente, cnpj, notifs)
 
             # Busca o responsável pela empresa
             discord_id = buscar_responsavel_empresa(cliente)
@@ -1152,9 +1197,19 @@ async def email_monitor():
                     logger.info(f">> Responsável não encontrado -> mencionando Fabiana")
                     empresas_sem_responsavel.append(cliente)
 
-            await channel.send(mencao, embed=embed)
-            logger.info(f">> Mensagem enviada com sucesso! | Cliente: {cliente}")
-            enviadas += 1
+            # Uma falha numa empresa não pode derrubar o lote inteiro: antes, a
+            # exceção impedia a marcação dos e-mails e o bot reenviava tudo
+            # a cada ciclo.
+            try:
+                # Menciona só na primeira mensagem; as continuações vão sem menção
+                for i, embed in enumerate(embeds):
+                    await channel.send(mencao if i == 0 else None, embed=embed)
+                logger.info(f">> Mensagem enviada com sucesso! | Cliente: {cliente}"
+                            + (f" ({len(embeds)} partes)" if len(embeds) > 1 else ""))
+                enviadas += 1
+            except Exception as e:
+                logger.error(f">> Falha ao enviar notificações de {cliente}: {e}")
+                empresas_com_falha.append(cliente)
 
         # Envia relatório de empresas sem responsável (se houver)
         if empresas_sem_responsavel:
@@ -1169,9 +1224,31 @@ async def email_monitor():
             await channel.send(relatorio)
             logger.info(f">> Relatório enviado: {len(empresas_unicas)} empresa(s) sem responsável")
 
+        if empresas_com_falha:
+            chave_lote = frozenset(mid for _, mid in processed_ids)
+            if enviadas == 0:
+                # Nada saiu: provável problema geral (Discord fora do ar etc.).
+                # Tenta de novo no próximo ciclo, até o limite de tentativas.
+                tentativas_lote[chave_lote] = tentativas_lote.get(chave_lote, 0) + 1
+                if tentativas_lote[chave_lote] < MAX_TENTATIVAS_LOTE:
+                    raise RuntimeError(
+                        f"nenhuma empresa enviada (tentativa "
+                        f"{tentativas_lote[chave_lote]}/{MAX_TENTATIVAS_LOTE})"
+                    )
+            tentativas_lote.pop(chave_lote, None)
+
+            # Avisa o Hugo das empresas que falharam e segue em frente, para
+            # não reenviar ao Discord as que já foram notificadas
+            falhas = "\n".join(f"{i}. {c}" for i, c in enumerate(empresas_com_falha, 1))
+            await channel.send(
+                f"<@{HUGO_USER_ID}> **⚠️ Falha ao enviar notificações de "
+                f"{len(empresas_com_falha)} empresa(s)** (ver log):\n{falhas}"[:2000]
+            )
+            logger.warning(f">> {len(empresas_com_falha)} empresa(s) com falha no envio")
+
         if enviadas > 0:
             logger.info(f">> Resumo: {enviadas} empresa(s) notificada(s)")
-        else:
+        elif not empresas_com_falha:
             # Nenhuma notificação enviada - envia mensagem de parabéns
             await channel.send("🎉 **Parabéns!** Nenhuma notificação pendente no momento. Tudo em dia!")
             logger.info(">> Nenhuma notificação pendente - mensagem de parabéns enviada")
