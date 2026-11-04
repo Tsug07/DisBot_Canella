@@ -42,3 +42,36 @@ services:
     env_file: Bot_Rebecca/.env
     volumes:
       - ./_vps/rebecca:/var/lib/bot
+
+  bot_gerson:
+    <<: *bot
+    container_name: disbot_gerson
+    working_dir: /app/Bot_Gerson
+    command: ["python", "gerson_bot.py"]
+    # Sem env_file: o Gerson le sozinho o config/.env (montado abaixo). O que esta
+    # aqui VENCE o .env (load_dotenv nao sobrescreve variavel ja definida).
+    environment:
+      # Nao faz login no Onvio: usa o token que a Libby renova (mesma conta).
+      GESTTA_TOKEN_ORIGEM: libby
+      GESTTA_TOKEN_FILE: /var/lib/libby-tokens/messenger_token.txt
+      # Conferir o token de hora em hora custa so ler um arquivo; avisa cedo se
+      # a renovacao da Libby parar.
+      GESTTA_TOKEN_INTERVALO_H: "1"
+      # Copias de estado_empresas.json em backups/ (na VM nunca eram apagadas).
+      GERSON_MAX_BACKUPS: "500"
+    # O Gerson usa as pastas config/ data/ logs/ backups/ ao lado do codigo.
+    # Cada uma vira um bind mount -- nenhuma tem codigo, so dado.
+    volumes:
+      - ./_vps/gerson/config:/app/Bot_Gerson/config
+      - ./_vps/gerson/data:/app/Bot_Gerson/data
+      - ./_vps/gerson/logs:/app/Bot_Gerson/logs
+      - ./_vps/gerson/backups:/app/Bot_Gerson/backups
+      - libby_tokens:/var/lib/libby-tokens:ro
+
+volumes:
+  # Criado pelo compose da Libby (canella_libby/docker-compose.prod.yml). Se a
+  # Libby ainda nao foi deployada com ele, o `up` falha com "external volume not
+  # found" -- de proposito: sem esse volume o Gerson nao teria token.
+  libby_tokens:
+    external: true
+    name: libby_gestta_tokens

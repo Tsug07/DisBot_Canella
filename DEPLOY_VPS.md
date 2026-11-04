@@ -1,12 +1,31 @@
 # Bots na VPS — deploy
 
-Bip e Rebecca rodam na VPS da Libby, em containers próprios (`docker-compose.yml`
-desta pasta), separados do compose da Libby. O Gerson continua na VM por enquanto.
+Bip, Rebecca e Gerson rodam na VPS da Libby, em containers próprios
+(`docker-compose.yml` desta pasta), separados do compose da Libby.
 
 | Bot | Container | Estado e logs na VPS |
 |---|---|---|
 | Bip | `disbot_bip` | `_vps/bip/` |
 | Rebecca | `disbot_rebecca` | `_vps/rebecca/` |
+| Gerson | `disbot_gerson` | `_vps/gerson/` (`config/`, `data/`, `logs/`, `backups/`) |
+
+> **O repositório é público.** Estado (`data/`), `.env`, `credentials.json` e
+> tokens nunca entram no git; eles chegam à VPS pelo Web console.
+
+## Gerson e o token da Libby
+
+Na VPS o Gerson **não faz login no Onvio**. Ele lê o token do Messenger que a
+Libby já renova a cada 8h (`messenger_token.txt`, no volume `libby_gestta_tokens`,
+montado só para leitura). As duas usam a mesma conta Onvio; dois robôs logando
+nela por conta própria é o caminho para o Auth0 bloquear a conta.
+
+- Quem liga isso são as variáveis `GESTTA_TOKEN_ORIGEM=libby` e
+  `GESTTA_TOKEN_FILE` no `docker-compose.yml`. Sem elas (na VM), o Gerson faz
+  o login próprio como sempre.
+- Se o token da Libby vencer, o Gerson alerta no Discord apontando para a Libby
+  (Configurações → login do Onvio), não para ele mesmo.
+- **Ordem obrigatória:** a Libby precisa ser deployada com o volume antes do
+  primeiro `up` daqui. Sem ele, o `up` falha com *external volume not found*.
 
 > **Uma instância por vez.** O mesmo token rodando na VM e na VPS envia as
 > mensagens em dobro. Sempre desligue na VM **antes** de ligar na VPS.
@@ -92,6 +111,32 @@ online no servidor.
 
 ---
 
+## Instalação do Gerson
+
+1. **Libby primeiro** (cria o volume do token):
+   ```bash
+   cd /root/canella_libby && git pull
+   docker compose -f docker-compose.prod.yml up -d --build
+   ```
+   Esse primeiro deploy faz **um** login no Onvio, porque o volume nasce vazio.
+   Daí em diante o token sobrevive aos deploys. Espere um ou dois minutos e confira:
+   ```bash
+   docker exec canella_libby ls -la /var/lib/libby-tokens
+   ```
+   Devem aparecer `gestta_token.txt` e `messenger_token.txt`.
+2. **Desligue o Gerson na VM** (DisC0ntrol) e tire-o do início automático.
+3. **Leve config e estado** da VM para `_vps/gerson/` pelo Web console: o `.env`
+   (sem as linhas `GESTTA_ONVIO_*`, que na VPS não servem), o `credentials.json`
+   e os arquivos `.json/.txt/.flag` de `data/`. Os PDFs antigos e os 25 mil
+   arquivos de `backups/` ficam na VM.
+4. **Suba:**
+   ```bash
+   cd /root/DisBot_Canella && git pull
+   docker compose up -d --build
+   docker compose logs --tail 60 bot_gerson
+   ```
+   Procure `[Gestta] Token: Token da Libby valido (~Nh restantes)`.
+
 ## Atualizar depois de uma mudança no código
 
 No PC: commit e push. Na VPS:
@@ -135,3 +180,9 @@ volta para a pasta do bot na VM e ligue o bot pelo DisC0ntrol.
 | `BOT_DATA_DIR` | pasta do bot | `/var/lib/bot/dados` |
 | `BOT_LOG_DIR` | `logs` | `/var/lib/bot/logs` |
 | `BOT_SEM_LOCK` | desligada | `1`: sem o `.lock`, porque o PID se repete entre reinícios do container e o bot se recusaria a subir |
+| `GESTTA_TOKEN_ORIGEM` (Gerson) | login próprio | `libby`: só lê o token da Libby |
+| `GESTTA_TOKEN_FILE` (Gerson) | `config/gestta_token.txt` | `/var/lib/libby-tokens/messenger_token.txt` |
+| `GERSON_MAX_BACKUPS` (Gerson) | sem limite | `500` cópias de `estado_empresas.json` |
+
+Os bots Bip e Rebecca guardam estado em `BOT_DATA_DIR`. O Gerson usa as pastas
+`config/ data/ logs/ backups/` ao lado do código, e cada uma vira um bind mount.

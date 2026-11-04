@@ -8,6 +8,7 @@ import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import logging
+from logging.handlers import RotatingFileHandler
 import shutil
 from pathlib import Path
 import sys
@@ -34,7 +35,10 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(LOGS_DIR / 'bot_logs.log', encoding='utf-8'),
+        # Rotativo (10 MB x 5), igual Bip e Rebecca. O FileHandler simples nunca
+        # parava de crescer: na VM o arquivo chegou a 126 MB.
+        RotatingFileHandler(LOGS_DIR / 'bot_logs.log', maxBytes=10 * 1024 * 1024,
+                            backupCount=5, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -174,11 +178,40 @@ def eh_status_monitorado(status):
     # Verifica se o status normalizado está na lista de monitorados
     return status_normalizado in STATUS_MONITORADOS
 
+# === LIMITE DE BACKUPS ===
+# Cada salvamento do estado gera uma copia em backups/ e nada as apagava: na VM ja
+# passam de 25 mil arquivos. Na VPS isso encheria o disco que a Libby e o Postgres
+# tambem usam. GERSON_MAX_BACKUPS (setado no container) mantem so os N mais
+# recentes. Sem a variavel, nada e apagado -- a VM segue como sempre foi.
+try:
+    GERSON_MAX_BACKUPS = int(os.getenv("GERSON_MAX_BACKUPS", "0"))
+except ValueError:
+    GERSON_MAX_BACKUPS = 0
+
+
+def _podar_backups():
+    if GERSON_MAX_BACKUPS <= 0:
+        return
+    try:
+        # O timestamp no nome (AAAAMMDD_HHMMSS) ordena igual a data.
+        arquivos = sorted(BACKUPS_DIR.glob("estado_empresas_backup_*.json"))
+        for velho in arquivos[:-GERSON_MAX_BACKUPS]:
+            velho.unlink(missing_ok=True)
+    except Exception as e:  # noqa
+        logger.warning(f"Não foi possível podar backups antigos: {e}")
+
+
 # === FUNÇÕES DE CONTROLE DE LOCKFILE ===
 LOCKFILE_PATH = BOT_DIR / "gerson_bot.lock"
 
 def criar_lockfile():
     """Cria o arquivo de lock com o PID do processo."""
+    # No container o Docker ja garante uma instancia so, e a trava atrapalha:
+    # o PID se repete entre reinicios, entao depois de um `docker restart` o lock
+    # antigo apontaria para o PROPRIO processo e o bot se recusaria a subir.
+    if os.getenv("BOT_SEM_LOCK") == "1":
+        logger.info("BOT_SEM_LOCK=1: trava de instancia unica desligada (container).")
+        return
     try:
         if LOCKFILE_PATH.exists():
             # Verifica se o processo ainda está rodando
@@ -917,6 +950,7 @@ class MyBot(discord.Client):
             timestamp = agora.strftime("%Y%m%d_%H%M%S")
             backup_path = BACKUPS_DIR / f"estado_empresas_backup_{timestamp}.json"
             shutil.copy(caminho, backup_path)
+            _podar_backups()
 
             # Atualiza histórico de hashes para detecção de regressão
             hash_atual = calcular_hash_dados(dados)
@@ -1159,6 +1193,16 @@ class MyBot(discord.Client):
                       "**travado de propósito**, para não bloquear a conta.\n"
                       "1. Corrigir `GESTTA_ONVIO_EMAIL` / `SENHA` / `TOTP_SECRET` no `.env`\n"
                       "2. Rodar `python atualizar_token_gestta.py --destravar`",
+                inline=False
+            )
+        elif os.getenv("GESTTA_TOKEN_ORIGEM", "").strip().lower() == "libby":
+            # Na VPS o token vem da Libby: o conserto e la, nao no Gerson.
+            embed.add_field(
+                name="Ação necessária",
+                value="O token do Gestta vem da **Libby**, e ela não conseguiu renová-lo. "
+                      "Confira o login do Onvio em **Configurações da Libby** (e-mail, senha "
+                      "e autenticador) e os logs do container `canella_libby`. Quando a Libby "
+                      "renovar, o Gerson volta sozinho.",
                 inline=False
             )
         else:

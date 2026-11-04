@@ -59,7 +59,10 @@ except ImportError:
 # ----------------------------------------------------------------------------
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ESTADO_PATH = os.path.join(BASE_DIR, "data", "estado_empresas.json")
-TOKEN_FILE = os.path.join(BASE_DIR, "config", "gestta_token.txt")
+# GESTTA_TOKEN_FILE: no container aponta para o token da Libby (ver
+# atualizar_token_gestta.TOKEN_DA_LIBBY). Na VM, o arquivo de sempre.
+TOKEN_FILE = (os.environ.get("GESTTA_TOKEN_FILE")
+              or os.path.join(BASE_DIR, "config", "gestta_token.txt"))
 
 API_BASE = "https://api.gestta.com.br/messenger-admin/company/contact"
 STATUS_SUSPENSA_PREFIX = "SUSPENSA"   # cobre "SUSPENSA", "SUSPENSA (MANUTENCAO)", etc.

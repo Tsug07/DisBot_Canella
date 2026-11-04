@@ -21,3 +21,4 @@ RUN pip install -r requirements-docker.txt
 # chegam pelo docker-compose (env_file e a pasta _vps/).
 COPY Bot_Bip/ Bot_Bip/
 COPY Bot_Rebecca/ Bot_Rebecca/
+COPY Bot_Gerson/ Bot_Gerson/

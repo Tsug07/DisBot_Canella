@@ -59,7 +59,14 @@ except ImportError:
     load_dotenv = None
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-TOKEN_FILE = os.path.join(BASE_DIR, "config", "gestta_token.txt")
+TOKEN_FILE = (os.environ.get("GESTTA_TOKEN_FILE")
+              or os.path.join(BASE_DIR, "config", "gestta_token.txt"))
+# GESTTA_TOKEN_ORIGEM=libby (container na VPS): o Gerson NAO faz login. Ele so le
+# o token que a Libby ja renova (messenger_token.txt, montado read-only em
+# GESTTA_TOKEN_FILE). Os dois usam a MESMA conta Onvio, e dois robos logando nela
+# por conta propria e o caminho para o Auth0 bloquear a conta (ja aconteceu em
+# 01/09/2026). Com isso, um login so -- o da Libby -- serve aos dois.
+TOKEN_DA_LIBBY = os.environ.get("GESTTA_TOKEN_ORIGEM", "").strip().lower() == "libby"
 # Contador de recusas de credencial (trava anti-bloqueio de conta). Fica em data/
 # porque precisa sobreviver a reinicios do bot -- o Auth0 conta as tentativas do
 # lado dele, entao reiniciar o Gerson nao pode zerar a protecao.
@@ -264,6 +271,8 @@ def marcar_recusa(motivo):
 
 def login_travado():
     """Motivo pelo qual o login esta travado, ou '' se pode tentar."""
+    if TOKEN_DA_LIBBY:
+        return ""   # sem login proprio, nao ha o que travar (a trava e da Libby)
     n, motivo, quando = _ler_recusas()
     if n >= LIMITE_RECUSAS:
         return ("%d tentativas de login foram RECUSADAS seguidas (ultima em %s: %s). "
@@ -820,6 +829,25 @@ def obter_token_lancando_chrome(chrome=None, profile=DEFAULT_PROFILE,
 # ---------------------------------------------------------------------------
 # Orquestracao
 # ---------------------------------------------------------------------------
+def _conferir_token_da_libby(caminho=TOKEN_FILE):
+    """Modo libby: 'renovar' vira so conferir o arquivo que a Libby mantem.
+
+    Margem de 1h, a mesma da Libby (MARGEM_SEG): ela renova a cada 8h um token
+    de ~24h, entao abaixo de 1h significa que a renovacao DELA esta falhando --
+    e e la que se resolve, nao aqui."""
+    if token_valido(caminho, margem_seg=3600):
+        exp = _decodificar_exp(open(caminho, encoding="utf-8").read().strip().strip('"'))
+        resta = int((exp - time.time()) / 3600) if exp else "?"
+        return True, f"Token da Libby valido (~{resta}h restantes)."
+    if not os.path.exists(caminho):
+        return False, (f"Token da Libby nao encontrado em {caminho}. Confira se o "
+                       "volume libby_gestta_tokens esta montado e se a Libby ja "
+                       "fez o primeiro login depois do deploy.")
+    return False, ("Token da Libby vencido ou a menos de 1h de vencer. Quem renova "
+                   "e a Libby (a cada 8h): veja os logs do container canella_libby "
+                   "e o login do Onvio em Configuracoes da Libby.")
+
+
 def renovar(host=DEFAULT_HOST, porta=DEFAULT_PORT, forcar=False, caminho=TOKEN_FILE,
             launch=False, chrome=None, profile=DEFAULT_PROFILE, headless=True,
             recarregar=False, sso=False):
@@ -832,6 +860,9 @@ def renovar(host=DEFAULT_HOST, porta=DEFAULT_PORT, forcar=False, caminho=TOKEN_F
     - recarregar  : (connect-mode simples) recarrega a aba do Messenger antes de ler.
     - launch=False e sso=False: conecta e le a aba do Gestta ja aberta/logada.
     """
+    if TOKEN_DA_LIBBY:
+        return _conferir_token_da_libby(caminho)
+
     if not forcar and token_valido(caminho):
         return True, "Token atual ainda valido; nada a fazer."
 
