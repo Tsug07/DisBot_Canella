@@ -22,3 +22,4 @@ RUN pip install -r requirements-docker.txt
 COPY Bot_Bip/ Bot_Bip/
 COPY Bot_Rebecca/ Bot_Rebecca/
 COPY Bot_Gerson/ Bot_Gerson/
+COPY controle/ controle/

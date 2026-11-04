@@ -137,6 +137,62 @@ online no servidor.
    ```
    Procure `[Gestta] Token: Token da Libby valido (~Nh restantes)`.
 
+## Tela Bots na Libby (porteiro `disbot_controle`)
+
+A Libby mostra e liga/desliga os bots pela tela **Bots do Discord** (menu
+Acompanhar). O DP e o Fiscal só veem; ligar, desligar e reiniciar é só para admin.
+
+A Libby **não** tem acesso ao Docker. Quem tem é o `disbot_controle`
+(`controle/controle.py`), e ele só sabe fazer status, log, ligar, desligar e
+reiniciar de três containers fixos. Os dois conversam pela rede `libby_bots`,
+que não publica porta, usando um segredo compartilhado.
+
+```
+Libby ──(rede libby_bots + segredo)──> disbot_controle ──(docker.sock)──> disbot_bip / _rebecca / _gerson
+```
+
+### Instalação (uma vez)
+
+1. **Gerar o segredo e gravá-lo nos dois lados.** O segredo nasce na própria
+   VPS, então não precisa sair de lá:
+   ```bash
+   TOKEN=$(openssl rand -hex 32)
+   cd /root/DisBot_Canella
+   echo "CONTROLE_TOKEN=$TOKEN" > controle.env && chmod 600 controle.env
+   cd /root/canella_libby
+   cp .env.production .env.production.bak
+   grep -v '^BOTS_CONTROLE_TOKEN=' .env.production.bak > .env.production
+   echo "BOTS_CONTROLE_TOKEN=$TOKEN" >> .env.production
+   unset TOKEN
+   ```
+2. **Libby primeiro**, porque ela cria a rede `libby_bots`:
+   ```bash
+   cd /root/canella_libby && git pull
+   docker compose -f docker-compose.prod.yml up -d --build
+   ```
+3. **Depois os bots** (sobe o `disbot_controle`):
+   ```bash
+   cd /root/DisBot_Canella && git pull
+   docker compose up -d --build
+   docker compose logs --tail 5 controle
+   ```
+   O esperado é `Porteiro dos bots ouvindo na porta 8090; bots: bip, rebecca, gerson`.
+
+### Bom saber
+
+- **Desligar pela tela** dura até alguém ligar de novo, mesmo depois de reiniciar
+  a VPS. **Mas um `docker compose up -d` aqui liga todos de novo.** Para atualizar
+  só alguns, passe os nomes: `docker compose up -d --build bot_gerson controle`.
+- **Quem fez o quê:** `docker compose logs controle` mostra cada ação, com o
+  nome de quem clicou.
+- **Mensagens na tela:**
+  - "não está configurado": falta o `BOTS_CONTROLE_TOKEN` no `.env.production`.
+  - "recusou o segredo": os dois arquivos têm segredos diferentes.
+  - "Não foi possível falar": o `disbot_controle` está parado.
+- **Bot novo** precisa entrar em `BOTS`, nos dois arquivos:
+  `controle/controle.py` (o nome do container) e
+  `canella_libby/server/app/bots.py` (os textos da tela).
+
 ## Atualizar depois de uma mudança no código
 
 No PC: commit e push. Na VPS:
@@ -146,6 +202,10 @@ cd /root/DisBot_Canella
 git pull
 docker compose up -d --build
 ```
+
+Isso **religa** qualquer bot que tenha sido desligado pela tela Bots. Se algum
+deve continuar desligado, desligue de novo pela tela ou suba só os outros
+serviços, passando os nomes deles.
 
 O `_vps/` não é tocado pelo `git pull` nem pelo rebuild.
 

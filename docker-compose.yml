@@ -68,6 +68,29 @@ services:
       - ./_vps/gerson/backups:/app/Bot_Gerson/backups
       - libby_tokens:/var/lib/libby-tokens:ro
 
+  # Porteiro: o UNICO com acesso ao Docker. Atende a tela Bots da Libby, e so
+  # sabe status/log/ligar/desligar/reiniciar dos tres bots acima (lista fixa em
+  # controle/controle.py). Ver o cabecalho de la para o porque.
+  controle:
+    <<: *bot
+    container_name: disbot_controle
+    working_dir: /app/controle
+    command: ["python", "controle.py"]
+    mem_limit: 64m
+    # CONTROLE_TOKEN: o mesmo segredo que a Libby tem em BOTS_CONTROLE_TOKEN.
+    env_file: controle.env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    # So na rede libby_bots (criada pela Libby): sem porta publicada, quem
+    # alcanca o porteiro e a Libby. Os bots nao precisam estar nesta rede.
+    networks:
+      - libby_bots
+
+networks:
+  libby_bots:
+    external: true
+    name: libby_bots
+
 volumes:
   # Criado pelo compose da Libby (canella_libby/docker-compose.prod.yml). Se a
   # Libby ainda nao foi deployada com ele, o `up` falha com "external volume not

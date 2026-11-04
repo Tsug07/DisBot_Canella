@@ -69,3 +69,5 @@ wheels/
 backups/
 # Estado e logs dos bots na VPS (docker-compose.yml)
 _vps/
+# Segredo do porteiro (CONTROLE_TOKEN), gerado na VPS
+controle.env

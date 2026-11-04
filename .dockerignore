@@ -9,6 +9,7 @@
 **/emails_processados.json
 **/procuracoes_estado.json
 _vps/
+controle.env
 # Gerson: config/ (credentials.json, .env, token), data/ e backups/ sao dado,
 # nao codigo -- chegam pelos bind mounts de _vps/gerson/.
 Bot_Gerson/config/
