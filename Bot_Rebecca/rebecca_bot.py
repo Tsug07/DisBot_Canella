@@ -31,6 +31,7 @@ from config import get_logger
 import sys
 import atexit
 from pathlib import Path
+from contextlib import contextmanager
 
 load_dotenv()
 logger = get_logger()
@@ -42,6 +43,10 @@ CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
 
 # === CONFIGURAÇÃO DE LOCKFILE ===
 BOT_DIR = Path(__file__).parent.resolve()
+# Onde fica o que o bot APRENDE (estado). Na VM e a propria pasta do bot; no
+# container e um volume (BOT_DATA_DIR), senao todo deploy apagaria o estado.
+DATA_DIR = Path(os.getenv("BOT_DATA_DIR") or BOT_DIR)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOCKFILE_PATH = BOT_DIR / "bot_rebecca.lock"
 
 # === CONFIGURAÇÃO DO GOOGLE SHEETS ===
@@ -63,7 +68,7 @@ GMAIL_LABEL_PROCESSADO = "DEC-processado"
 # Arquivo com os X-GM-MSGID já processados (rede de segurança caso a label
 # falhe ou seja removida manualmente). O X-GM-MSGID é estável, diferente do
 # ID de sequência IMAP, que muda quando a pasta muda.
-PROCESSADOS_JSON_PATH = BOT_DIR / "emails_processados.json"
+PROCESSADOS_JSON_PATH = DATA_DIR / "emails_processados.json"
 
 # Quantos IDs manter no histórico local (evita o arquivo crescer sem limite)
 MAX_HISTORICO_PROCESSADOS = 500
@@ -85,7 +90,7 @@ SECOES_PROCURACOES = [
 
 # Arquivo que guarda a "impressão digital" do último relatório enviado, para
 # só notificar quando alguma empresa entra ou sai das seções acompanhadas.
-PROCURACOES_ESTADO_PATH = BOT_DIR / "procuracoes_estado.json"
+PROCURACOES_ESTADO_PATH = DATA_DIR / "procuracoes_estado.json"
 
 # ID do cargo Legalização no Discord
 LEGALIZACAO_ROLE_ID = "1299045050881151006"
@@ -119,6 +124,13 @@ STATUS_NEGATIVOS = ["BAIXA", "DEVOLVIDA", "INATIVA"]
 
 def criar_lockfile():
     """Cria o arquivo de lock com o PID do processo."""
+    # No container o Docker ja garante uma instancia so, e a trava atrapalha:
+    # o PID se repete entre reinicios (o bot costuma ser sempre o PID 1), entao
+    # depois de um `docker restart` o lock antigo apontaria para o PROPRIO
+    # processo, e o bot se recusaria a subir -- laco de reinicio infinito.
+    if os.getenv("BOT_SEM_LOCK") == "1":
+        logger.info("BOT_SEM_LOCK=1: trava de instancia unica desligada (container).")
+        return
     try:
         if LOCKFILE_PATH.exists():
             # Verifica se o processo ainda está rodando
@@ -169,6 +181,21 @@ def remover_lockfile():
 # ------------------------------------------
 # FUNÇÕES PARA CARREGAR PLANILHA E MAPEAMENTO
 # ------------------------------------------
+@contextmanager
+def _gravacao_atomica(caminho):
+    """Abre um temporario ao lado de `caminho` e so troca pelo definitivo no fim.
+
+    Se o processo morrer no meio da escrita (um `docker stop`, queda de luz na
+    VM), o arquivo antigo continua inteiro. Sem isso, um JSON cortado ao meio
+    vira historico vazio na proxima leitura e o bot reenvia avisos ja dados."""
+    tmp = Path(str(caminho) + ".tmp")
+    with open(tmp, 'w', encoding='utf-8') as f:
+        yield f
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, caminho)
+
+
 def carregar_processados():
     """
     Carrega do disco o conjunto de X-GM-MSGID já processados.
@@ -199,7 +226,7 @@ def salvar_processados(msgids):
     """
     try:
         ids = list(msgids)[-MAX_HISTORICO_PROCESSADOS:]
-        with open(PROCESSADOS_JSON_PATH, 'w', encoding='utf-8') as f:
+        with _gravacao_atomica(PROCESSADOS_JSON_PATH) as f:
             json.dump(
                 {
                     "_descricao": "X-GM-MSGID dos e-mails DEC já processados pelo bot. "
@@ -614,7 +641,7 @@ def salvar_estado_procuracoes(hash_atual, secoes):
             titulo: sorted(f"{c}|{v}" for c, _, v in secoes.get(titulo, []))
             for titulo in SECOES_PROCURACOES
         }
-        with open(PROCURACOES_ESTADO_PATH, 'w', encoding='utf-8') as f:
+        with _gravacao_atomica(PROCURACOES_ESTADO_PATH) as f:
             json.dump(
                 {
                     "_descricao": "Estado do último aviso de procurações enviado ao "

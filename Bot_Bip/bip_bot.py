@@ -28,6 +28,10 @@ CHANNEL_ID_BIP = int(os.getenv("CHANNEL_ID_BIP", "0"))
 
 # === CONFIGURAÇÃO DE LOCKFILE ===
 BOT_DIR = Path(__file__).parent.resolve()
+# Onde fica o que o bot APRENDE (estado). Na VM e a propria pasta do bot; no
+# container e um volume (BOT_DATA_DIR), senao todo deploy apagaria o estado.
+DATA_DIR = Path(os.getenv("BOT_DATA_DIR") or BOT_DIR)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 LOCKFILE_PATH = BOT_DIR / "bot_bip.lock"
 
 # === CONFIGURAÇÃO DO GOOGLE SHEETS ===
@@ -64,6 +68,13 @@ STATUS_NEGATIVOS = ["BAIXA", "DEVOLVIDA", "INATIVA"]
 
 def criar_lockfile():
     """Cria o arquivo de lock com o PID do processo."""
+    # No container o Docker ja garante uma instancia so, e a trava atrapalha:
+    # o PID se repete entre reinicios (o bot costuma ser sempre o PID 1), entao
+    # depois de um `docker restart` o lock antigo apontaria para o PROPRIO
+    # processo, e o bot se recusaria a subir -- laco de reinicio infinito.
+    if os.getenv("BOT_SEM_LOCK") == "1":
+        logger.info("BOT_SEM_LOCK=1: trava de instancia unica desligada (container).")
+        return
     try:
         if LOCKFILE_PATH.exists():
             # Verifica se o processo ainda está rodando

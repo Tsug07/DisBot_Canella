@@ -1,0 +1,44 @@
+# Bots Discord na VPS. Fica SEPARADO do compose da Libby: subir/derrubar um bot
+# nunca mexe na Libby, e vice-versa.
+#
+#   docker compose up -d --build        # sobe/atualiza todos
+#   docker compose logs -f bot_rebecca  # acompanha um bot
+#   docker compose restart bot_bip      # reinicia um bot
+#
+# Cada bot guarda estado e logs em ./_vps/<bot>/ (gitignored). E pasta comum no
+# host de proposito: da para ver/colar arquivos pelo Web console sem docker cp.
+
+x-bot: &bot
+  build: .
+  image: disbot_canella:latest
+  restart: unless-stopped
+  # A VPS tem 3,8 GB e ja usa swap; um bot com vazamento de memoria nao pode
+  # levar a Libby junto. Um bot discord.py ocioso fica em ~60-80 MB.
+  mem_limit: 256m
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  environment:
+    BOT_DATA_DIR: /var/lib/bot/dados
+    BOT_LOG_DIR: /var/lib/bot/logs
+
+services:
+  bot_bip:
+    <<: *bot
+    container_name: disbot_bip
+    working_dir: /app/Bot_Bip
+    command: ["python", "bip_bot.py"]
+    env_file: Bot_Bip/.env
+    volumes:
+      - ./_vps/bip:/var/lib/bot
+
+  bot_rebecca:
+    <<: *bot
+    container_name: disbot_rebecca
+    working_dir: /app/Bot_Rebecca
+    command: ["python", "rebecca_bot.py"]
+    env_file: Bot_Rebecca/.env
+    volumes:
+      - ./_vps/rebecca:/var/lib/bot

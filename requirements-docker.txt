@@ -1,0 +1,6 @@
+# Dependencias dos bots no container (VPS). So o que os bots usam: as telas
+# (bot_manager.py: customtkinter, pystray, pillow) nao vao para a VPS.
+discord.py==2.3.2
+python-dotenv==1.0.0
+requests>=2.31.0
+reportlab>=4.0.0

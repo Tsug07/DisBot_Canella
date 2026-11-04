@@ -1,0 +1,14 @@
+# Nada de segredo ou estado dentro da imagem: segredo vem do env_file e estado
+# vive em _vps/ (volume). Imagem com .env embutido vaza o token a quem tiver a imagem.
+**/.env
+**/*.lock
+**/logs/
+**/backups/
+**/debug_output/
+**/__pycache__/
+**/emails_processados.json
+**/procuracoes_estado.json
+_vps/
+.git/
+.claude/
+*.html

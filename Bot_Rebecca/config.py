@@ -4,7 +4,8 @@ import sys
 from logging.handlers import RotatingFileHandler
 
 # Cria diretório de logs se não existir
-LOG_DIR = "logs"
+# No container os logs vao para um volume (BOT_LOG_DIR); na VM, ./logs.
+LOG_DIR = os.getenv("BOT_LOG_DIR", "logs")
 if not os.path.exists(LOG_DIR):
     os.makedirs(LOG_DIR)
 

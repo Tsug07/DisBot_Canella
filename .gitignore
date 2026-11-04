@@ -67,3 +67,5 @@ wheels/
 
 # Backups gerais
 backups/
+# Estado e logs dos bots na VPS (docker-compose.yml)
+_vps/
