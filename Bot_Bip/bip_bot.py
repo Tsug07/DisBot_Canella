@@ -1,6 +1,7 @@
 import discord
 from discord.ext import tasks, commands
 import imaplib
+import asyncio
 import email
 from email.header import decode_header
 import re
@@ -154,7 +155,11 @@ def carregar_planilha_empresas():
         content = response.content.decode('utf-8')
         reader = csv.reader(StringIO(content))
 
-        empresa_responsavel_cache = {}
+        # Monta a parte e troca no fim: a leitura de e-mail roda em outra thread
+        # e consulta este cache; zerar e preencher no lugar deixava uma janela com
+        # o cache vazio (empresa "sem responsavel"), e um erro no meio deixava
+        # o cache vazio ate o dia seguinte.
+        novo_cache = {}
         for idx, row in enumerate(reader):
             # Pula cabeçalho (primeira linha)
             if idx == 0:
@@ -176,12 +181,13 @@ def carregar_planilha_empresas():
 
                 # Carrega todas as empresas (mesmo sem responsável) para verificar status
                 if empresa:
-                    empresa_responsavel_cache[empresa] = {
+                    novo_cache[empresa] = {
                         'responsavel_dp': responsavel_dp,  # Responsável DP (coluna D)
                         'responsavel': responsavel,  # Responsável (coluna E)
                         'situacao': situacao
                     }
 
+        empresa_responsavel_cache = novo_cache
         logger.info(f"Planilha carregada: {len(empresa_responsavel_cache)} empresas mapeadas")
 
     except requests.RequestException as e:
@@ -591,6 +597,11 @@ def extract_ecac_notification(body, subject):
 # ------------------------------------------
 # FUNÇÃO PARA LER OS E-MAILS DA PASTA ECAC
 # ------------------------------------------
+# Sem timeout, um Gmail que para de responder prende a leitura para sempre --
+# e o bot segue aparecendo online sem checar nada.
+IMAP_TIMEOUT_SEG = 60
+
+
 def check_emails():
     """
     Lê emails não lidos da pasta ECAC.
@@ -598,7 +609,7 @@ def check_emails():
     Retorna tupla (notificações, alertas_procuração).
     """
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=IMAP_TIMEOUT_SEG)
         mail.login(GMAIL_USER, GMAIL_PASS)
         logger.info("Conectado ao Gmail com sucesso")
 
@@ -753,7 +764,10 @@ async def email_monitor():
             logger.error(f"Canal Discord com ID {CHANNEL_ID_BIP} não encontrado")
             return
 
-        notifications, alertas_procuracao = check_emails()
+        # Em thread: o IMAP do Gmail as vezes leva 10-20s, e rodando direto aqui o
+        # loop do discord.py nao respondia ao heartbeat ("heartbeat blocked") e o
+        # Discord derrubava a conexao. As mensagens continuam saindo daqui (async).
+        notifications, alertas_procuracao = await asyncio.to_thread(check_emails)
 
         logger.info(f">> Total de notificacoes coletadas: {len(notifications)}")
         logger.info(f">> Total de alertas de procuração: {len(alertas_procuracao)}")
@@ -907,7 +921,7 @@ async def email_monitor():
 async def atualizar_cache_planilha():
     """Atualiza o cache da planilha uma vez por dia."""
     logger.info("Atualizando cache da planilha (tarefa diária)...")
-    atualizar_caches()
+    await asyncio.to_thread(atualizar_caches)
     logger.info("Cache da planilha atualizado com sucesso")
 
 
@@ -931,7 +945,7 @@ async def on_ready():
         logger.error(f"Erro ao enviar mensagem de inicialização: {e}")
 
     # Carrega os caches de empresas e responsáveis
-    atualizar_caches()
+    await asyncio.to_thread(atualizar_caches)
 
     # Inicia as tarefas
     email_monitor.start()

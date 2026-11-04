@@ -1,6 +1,7 @@
 import discord
 from discord.ext import tasks, commands
 import imaplib
+import asyncio
 import email
 from email.header import decode_header, make_header
 import re
@@ -271,7 +272,11 @@ def carregar_planilha_empresas():
         content = response.content.decode('utf-8')
         reader = csv.reader(StringIO(content))
 
-        empresa_responsavel_cache = {}
+        # Monta a parte e troca no fim: a leitura de e-mail roda em outra thread
+        # e consulta este cache; zerar e preencher no lugar deixava uma janela com
+        # o cache vazio (empresa "sem responsavel"), e um erro no meio deixava
+        # o cache vazio ate o dia seguinte.
+        novo_cache = {}
         for idx, row in enumerate(reader):
             # Pula cabeçalho (primeira linha)
             if idx == 0:
@@ -293,11 +298,12 @@ def carregar_planilha_empresas():
 
                 # Carrega todas as empresas (mesmo sem responsável) para verificar status
                 if empresa:
-                    empresa_responsavel_cache[empresa] = {
+                    novo_cache[empresa] = {
                         'responsavel': responsavel,  # Pode ser vazio
                         'situacao': situacao
                     }
 
+        empresa_responsavel_cache = novo_cache
         logger.info(f"Planilha carregada: {len(empresa_responsavel_cache)} empresas mapeadas")
 
     except requests.RequestException as e:
@@ -812,9 +818,14 @@ def gerar_pdf_procuracoes(secoes, data_email):
 # ------------------------------------------
 # FUNÇÃO PARA LER OS E-MAILS DA PASTA DEC
 # ------------------------------------------
+# Sem timeout, um Gmail que para de responder prende a leitura para sempre --
+# e o bot segue aparecendo online sem checar nada.
+IMAP_TIMEOUT_SEG = 60
+
+
 def check_emails():
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=IMAP_TIMEOUT_SEG)
         mail.login(GMAIL_USER, GMAIL_PASS)
         logger.info("Conectado ao Gmail com sucesso")
 
@@ -969,7 +980,7 @@ def marcar_como_processados(processed_ids):
         logger.info(f">> {len(msgids)} e-mail(s) registrado(s) no histórico local")
 
     try:
-        mail = imaplib.IMAP4_SSL("imap.gmail.com")
+        mail = imaplib.IMAP4_SSL("imap.gmail.com", timeout=IMAP_TIMEOUT_SEG)
         mail.login(GMAIL_USER, GMAIL_PASS)
         mail.select("DEC")
 
@@ -1135,7 +1146,10 @@ async def email_monitor():
             logger.error(f"Canal Discord com ID {CHANNEL_ID} não encontrado")
             return
 
-        notifications, processed_ids, avisos_procuracoes = check_emails()
+        # Em thread: o IMAP do Gmail as vezes leva 10-20s, e rodando direto aqui o
+        # loop do discord.py nao respondia ao heartbeat ("heartbeat blocked") e o
+        # Discord derrubava a conexao. As mensagens continuam saindo daqui (async).
+        notifications, processed_ids, avisos_procuracoes = await asyncio.to_thread(check_emails)
 
         logger.info(f">> Total de notificacoes coletadas: {len(notifications)}")
 
@@ -1147,7 +1161,7 @@ async def email_monitor():
 
         if not notifications:
             # Marca e-mails sem notificações pendentes para não reprocessar
-            marcar_como_processados(processed_ids)
+            await asyncio.to_thread(marcar_como_processados, processed_ids)
             return
 
         total_antes = len(notifications)
@@ -1288,7 +1302,7 @@ async def email_monitor():
         # Só marca como processado após o envio ao Discord ter concluído com
         # sucesso. Se algo acima falhar, a exceção abaixo impede a marcação e o
         # e-mail continua sem a label, para ser reprocessado no próximo ciclo.
-        marcar_como_processados(processed_ids)
+        await asyncio.to_thread(marcar_como_processados, processed_ids)
 
     except Exception as e:
         logger.error(f"Erro na tarefa de monitoramento: {str(e)}")
@@ -1301,7 +1315,7 @@ async def email_monitor():
 async def atualizar_cache_planilha():
     """Atualiza o cache da planilha uma vez por dia."""
     logger.info("Atualizando cache da planilha (tarefa diária)...")
-    atualizar_caches()
+    await asyncio.to_thread(atualizar_caches)
     logger.info("Cache da planilha atualizado com sucesso")
 
 
@@ -1314,7 +1328,7 @@ async def on_ready():
     logger.info("=" * 50)
 
     # Carrega os caches de empresas e responsáveis
-    atualizar_caches()
+    await asyncio.to_thread(atualizar_caches)
 
     # Inicia as tarefas
     email_monitor.start()
